@@ -39,6 +39,13 @@ describe("calculateParlay", () => {
     expect(result.operationFee).toBe(0);
     expect(result.totalCost).toBe(0);
   });
+
+  it("uses the staging operation fee when no custom fee model is provided", () => {
+    const result = calculateParlay([leg("a", 0.5), leg("b", 0.25)], 10);
+
+    expect(result.operationFee).toBe(1);
+    expect(result.totalCost).toBe(11);
+  });
 });
 
 describe("probability formatting", () => {

@@ -1,7 +1,7 @@
 # LEGWORK Architecture Decision Log
 
 Status: Canonical
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ## Accepted Decisions
 
@@ -48,6 +48,46 @@ Markets sharing a Polymarket event are displayed as one expandable event group. 
 ### ADR-011: Launch Sequence
 
 The next target is supervised Sepolia staging. The following target is an invite-only Ethereum mainnet beta only after a dedicated mainnet gate review.
+
+### ADR-012: Staging Price and Fee Policy
+
+The staging basket spread starts at 7% and cannot exceed 12%. Explainable soft relationships can add at most five percentage points inside that limit. One pick per Polymarket event is allowed at launch. A hard-invalid or insufficiently understood relationship is unavailable rather than quoted with a worse spread. The operation fee is $0.50 per selected leg.
+
+### ADR-013: Discovery Is Not A Quote
+
+The persisted catalog is the searchable discovery index. Public market pages refresh their visible token IDs from CLOB, and checkout independently refreshes exact selected legs and stake depth. A broad catalog sweep is never treated as a live executable-price cache.
+
+### ADR-014: Static Sepolia Treasury
+
+The supervised staging Safe, Circle Sepolia USDC token, chain, and confirmation policy are deployment configuration. Runtime treasury mutation is disabled until authenticated operator roles and historical treasury-scope migration are approved.
+
+### ADR-015: Bounded Catalog Persistence
+
+The indexer observes the complete Polymarket sweep but stores a new market only after it passes launch eligibility. Previously stored markets continue to receive lifecycle updates even when they become ineligible. Each touched market retains its newest two unreferenced snapshots; every snapshot referenced by a quote or ticket is immutable and retained. This preserves automatic discovery and financial evidence without unbounded minute-by-minute catalog growth.
+
+### ADR-016: Financial Worker Availability
+
+Deposit, reconciliation, and settlement workers require both a fresh process heartbeat and a recent successful work cycle. Every process boot has a unique runtime instance ID and a database-issued monotonic generation, so a container restart must record a new successful cycle even if its numeric PID is reused, and delayed writes from an older process cannot reclaim health state. Each financial worker holds a PostgreSQL advisory-lock singleton lease for the life of its dedicated database session. Payment activation rechecks required worker health inside the activation transaction, and a transient worker outage leaves a confirmed payment retryable rather than releasing its accounting hold.
+
+### ADR-017: One Owner Per Onchain Transfer
+
+An exact USDC transfer identified by chain, transaction hash, and log index can fund either one user deposit or one supervised house-funding record, never both. Ownership is claimed atomically and deferred database constraints require every credited deposit or house-funding evidence row to have the matching immutable claim.
+
+### ADR-018: Catalog Completion And Liveness
+
+Catalog runtime health and catalog release completeness are separate signals. The current generation may progress while the timestamp of the last completed full sweep remains available. `/readyz` checks the worker process; `npm run qa:markets` additionally requires a recent completed sweep and recent current-generation progress before catalog release.
+
+### ADR-019: Pointer-Based Discovery Reads
+
+Each persisted market points to its latest catalog snapshot. Discovery ranks a bounded set of relational candidates before parsing snapshot JSON, and cursor pages reconstruct historical state only for markets that changed after the cursor was issued. The indexer and pointer backfill share an advisory lock so a deployment backfill cannot overwrite a newer snapshot pointer. This optimization applies only to discovery; visible prices and checkout still refresh independently from CLOB as required by ADR-013.
+
+### ADR-020: Deferred Wallet Runtime
+
+Anonymous browsing loads the market application without Privy, Viem, or wallet-provider code. The wallet runtime is loaded when a user selects Connect, or immediately for a returning browser with a prior wallet-session hint. Loading the runtime must not remount the basket, unsupported payment configuration must leave browsing available, and a wallet identity is considered synchronized only after the server accepts it.
+
+### ADR-021: Local Sepolia State Isolation
+
+Supervised local Sepolia staging uses a dedicated `legwork_sepolia_staging` PostgreSQL database and Redis logical database 1 on the existing loopback-only state containers. It never restores or copies development users, tickets, ledgers, deposits, or cache state. This is sufficient isolation for the single-machine supervised drill; hosted staging must use separately provisioned Postgres and Redis services.
 
 ## Deferred Decisions
 

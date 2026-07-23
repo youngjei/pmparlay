@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpDown,
   Banknote,
@@ -9,6 +9,7 @@ import {
   Layers3,
   LayoutDashboard,
   ReceiptText,
+  RefreshCw,
   Lightbulb,
   Search,
   ShoppingCart,
@@ -20,21 +21,34 @@ import {
 import { fetchMarketCatalog } from "./marketData";
 import { calculateParlay, formatCents, formatNumber, formatPercent, formatUsd } from "./parlayMath";
 import { assessTicketRisk } from "./riskEngine";
-import type { FetchState, MarketCatalog, MarketOutcome, ParlayLeg } from "./types";
+import type { ClaimableTicketPage, FetchState, MarketCatalog, MarketCatalogQuery, MarketOutcome, ParlayLeg } from "./types";
 
-const categoryOrder = ["All", "Sports", "Politics", "Crypto", "Economics", "Weather", "Technology", "General"];
+const categoryOrder = [
+  "All",
+  "Politics",
+  "Sports",
+  "Crypto",
+  "Finance and Economy",
+  "Technology and Science",
+  "Culture and Entertainment",
+  "World and Weather",
+  "Other"
+] as const;
 const stakeCapUsd = 25;
 const stakeAdds = [1, 5, 10];
-const marketDisplayLimit = 96;
+const marketPageSize = 48;
+const claimableTicketPageSize = 50;
+const maxClaimableTicketPages = 200;
 const marketCatalogStaleAfterMs = 30_000;
 const sortOptions = [
-  { value: "popular", label: "Highest volume" },
-  { value: "ending", label: "Ending soon" },
-  { value: "balanced", label: "Most balanced" },
-  { value: "liquidity", label: "Deepest liquidity" }
+  { value: "volume", label: "Highest volume" },
+  { value: "ending_soon", label: "Ending soon" },
+  { value: "liquidity", label: "Deepest liquidity" },
+  { value: "newest", label: "Newest" }
 ] as const;
 
 type SortOrder = (typeof sortOptions)[number]["value"];
+type CanonicalCategory = (typeof categoryOrder)[number];
 
 type MarketRow = {
   marketId: string;
@@ -47,16 +61,59 @@ type MarketRow = {
   image?: string;
   icon?: string;
   marketUrl?: string;
+  eventGroupKey?: string;
+  eventTitle?: string;
+  eventSlug?: string;
   source: MarketOutcome["source"];
   outcomes: MarketOutcome[];
+};
+
+type MarketEventSurface = {
+  key: string;
+  structured: boolean;
+  rows: MarketRow[];
+  category: string;
+  eventTitle: string;
+  image?: string;
+  icon?: string;
+  marketUrl?: string;
+  volume: number;
+  liquidity: number;
+  endDate?: string;
+  marketCount: number;
+};
+
+type PaginationIssue = {
+  kind: "duplicate" | "malformed" | "request";
+  message: string;
+  cursor: string;
 };
 
 type ServerQuote = {
   id: string;
   status: "quoted" | "rejected" | "accepted" | "expired";
+  createdAt: string;
   expiresAt: string;
+  sourceAsOf: string;
+  stakeUsd: number;
+  operationFeeUsd: number;
+  totalCostUsd: number;
+  basketPrice: number;
+  basketProbability: number;
+  quoteSpread: number;
+  payoutMultiple: number;
   riskDecision: "accept" | "review" | "reject";
   potentialPayoutUsd: number;
+  riskChecks: Array<{ level: "ok" | "warn" | "block"; label: string; detail: string }>;
+  legs: Array<{
+    id: string;
+    marketId: string;
+    question: string;
+    outcome: string;
+    price: number;
+    marketUrl?: string;
+    endDate?: string;
+  }>;
 };
 
 type ServerTicket = {
@@ -78,16 +135,17 @@ type ServerPaymentIntent = {
   amountMicroUnits: string;
   amountUsdc: number;
   requiredConfirmations: number;
-  status: "pending" | "submitted" | "confirmed" | "activated" | "expired" | "failed";
+  status: "pending" | "submitted" | "confirmed" | "activated" | "expired" | "failed" | "recoverable";
   txHash?: string;
   ticketId?: string;
+  recoveryReason?: string;
   expiresAt: string;
 };
 
 type PendingPaymentSummary = {
   id: string;
   quoteId: string;
-  status: "submitted" | "confirmed";
+  status: "submitted" | "confirmed" | "recoverable";
   txHash?: string;
   chainId: number;
   amountPaidUsd: number;
@@ -97,7 +155,28 @@ type PendingPaymentSummary = {
   updatedAt: string;
 };
 
-type PaymentFlowState = "idle" | "loading" | "ready" | "sending" | "pending" | "activating" | "complete" | "error";
+type RecoverablePaymentResponse = {
+  status: "recoverable";
+  error: "payment_intent_recoverable";
+  reason: string;
+  paymentIntent?: ServerPaymentIntent;
+};
+
+type ApiErrorPayload = {
+  detail?: string;
+  error?: string;
+  status?: string;
+  reason?: string;
+  paymentIntent?: ServerPaymentIntent;
+};
+
+class ApiRequestError extends Error {
+  constructor(readonly payload: ApiErrorPayload | null) {
+    super(apiErrorMessage(payload, "Request failed."));
+  }
+}
+
+type PaymentFlowState = "idle" | "loading" | "ready" | "sending" | "pending" | "activating" | "recoverable" | "complete" | "error";
 
 type AppView = "markets" | "portfolio";
 
@@ -123,6 +202,7 @@ type TicketSummary = {
   operationFeeUsd?: number;
   amountPaidUsd?: number;
   potentialPayoutUsd?: number;
+  claimableAmountUsd?: number;
   accountingMode?: string;
   currency?: string;
   legs: number;
@@ -145,6 +225,7 @@ type TicketDetail = {
   operationFeeUsd: number;
   amountPaidUsd: number;
   potentialPayoutUsd: number;
+  claimableAmountUsd?: number;
   accountingMode: string;
   currency: string;
   purchaseTxHash?: string;
@@ -175,6 +256,14 @@ type WithdrawalSummary = {
   updatedAt: string;
 };
 
+type TicketClaimResult = {
+  ticketId: string;
+  status: "claimed" | "already_claimed";
+  ticketStatus: "paid";
+  amountMicroUnits: string;
+  currency: string;
+};
+
 type AccountDataState = "idle" | "loading" | "ready" | "error";
 
 type AppProps = {
@@ -188,6 +277,7 @@ type AppProps = {
     walletUsdcBalance?: number | null;
     walletBalanceState?: "idle" | "loading" | "ready" | "error";
     walletBalanceError?: string;
+    walletAddress?: string;
     userLabel?: string;
     getAccessToken?: () => Promise<string | null>;
     sendUsdcPayment?: (input: {
@@ -251,6 +341,20 @@ function shortDateTime(value?: string) {
   }).format(date);
 }
 
+function contractCloseDateTime(value?: string) {
+  if (!value) return "Close time unavailable";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Close time unavailable";
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short"
+  }).format(date);
+}
+
 function ageMs(value?: string) {
   if (!value) return undefined;
   const time = new Date(value).getTime();
@@ -293,6 +397,7 @@ function statusLabel(status: string) {
     accepted: "Live",
     live: "Live",
     won: "Won",
+    claimable: "Claimable",
     lost: "Lost",
     voided: "Refund due",
     paid: "Claimed",
@@ -353,10 +458,28 @@ function settlementDetailText(leg: TicketDetail["legs"][number]) {
     `Resolution ${resolutionStateLabel(leg.resolutionState)}`,
     leg.endDate ? `Ends ${shortDateTime(leg.endDate)}` : "",
     leg.nextResolutionCheckAt ? `Next check ${shortDateTime(leg.nextResolutionCheckAt)}` : "",
-    leg.resolutionUpdatedAt ? `Updated ${shortDateTime(leg.resolutionUpdatedAt)}` : "",
-    leg.lastResolutionError ? `Last error ${leg.lastResolutionError}` : ""
+    leg.resolutionUpdatedAt ? `Updated ${shortDateTime(leg.resolutionUpdatedAt)}` : ""
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+function settlementSummaryText(leg: TicketDetail["legs"][number], ticketStatus: string) {
+  const status = leg.resolutionState || leg.status;
+  if (status === "resolved_won" || leg.status === "won") return "Resolved in your favor.";
+  if (status === "resolved_lost" || leg.status === "lost") return "Resolved against this pick.";
+  if (status === "resolved_void" || leg.status === "voided") return "Voided; the stake portion is refundable.";
+  if (ticketStatus === "lost" && leg.status === "pending") return "No longer affects this basket.";
+  if (status === "disputed" || status === "settlement_blocked") return "Settlement needs review.";
+  if (isPastDate(leg.endDate)) return "Waiting for the final market result.";
+  return "Market is still active.";
+}
+
+function isVoidedRefundTicket(ticket: TicketSummary | TicketDetail) {
+  if ("legStatusCounts" in ticket && ticket.legStatusCounts?.voided) return true;
+  if ("legs" in ticket && Array.isArray(ticket.legs)) {
+    return ticket.legs.some((leg) => leg.status === "voided" || leg.resolutionState === "resolved_void");
+  }
+  return ticket.status === "voided";
 }
 
 function legProgressText(ticket: TicketSummary | TicketDetail) {
@@ -388,7 +511,7 @@ function statusTone(status: string) {
   if (status === "confirming" || status === "submitted" || status === "confirmed") return "confirming";
   if (status === "awaiting_oracle" || status === "resolution_candidate") return "confirming";
   if (status === "settlement_blocked" || status === "disputed") return "voided";
-  if (status === "won" || status === "resolved_won") return "won";
+  if (status === "won" || status === "claimable" || status === "resolved_won") return "won";
   if (status === "paid" || status === "sent") return "paid";
   if (status === "lost" || status === "failed" || status === "resolved_lost") return "lost";
   if (status === "voided" || status === "canceled" || status === "resolved_void") return "voided";
@@ -398,12 +521,27 @@ function statusTone(status: string) {
 function chainLabel(chainId?: number) {
   if (chainId === 1) return "Ethereum";
   if (chainId === 11155111) return "Sepolia";
+  if (chainId === 137) return "Polygon";
+  if (chainId === 80002) return "Polygon Amoy";
+  if (chainId === 8453) return "Base";
+  if (chainId === 84532) return "Base Sepolia";
   return chainId ? `Chain ${chainId}` : "Ethereum";
 }
 
 function txExplorerUrl(txHash: string, chainId?: number) {
   if (chainId === 11155111) return `https://sepolia.etherscan.io/tx/${txHash}`;
+  if (chainId === 137) return `https://polygonscan.com/tx/${txHash}`;
+  if (chainId === 80002) return `https://amoy.polygonscan.com/tx/${txHash}`;
+  if (chainId === 8453) return `https://basescan.org/tx/${txHash}`;
+  if (chainId === 84532) return `https://sepolia.basescan.org/tx/${txHash}`;
   return `https://etherscan.io/tx/${txHash}`;
+}
+
+function expiryCountdown(expiresAt: string, now: number) {
+  const remainingSeconds = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1_000));
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function configuredSettlementChainId() {
@@ -417,6 +555,28 @@ function balanceFor(summary: AccountSummary | null, accountTypes: string[], curr
   return account?.balance || 0;
 }
 
+function parseUsdcMicroUnits(value: string) {
+  if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole) * 1_000_000n + BigInt(`${fraction}000000`.slice(0, 6));
+}
+
+function formatUsdcInput(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return value.toFixed(6).replace(/\.0+$/, "").replace(/(\.[0-9]*?)0+$/, "$1");
+}
+
+function availableUsdcMicroUnits(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return 0n;
+  return BigInt(Math.round(value * 1_000_000));
+}
+
+function formatUsdcMicroUnits(value: bigint) {
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
 async function authedJson<T>(url: string, getAccessToken?: () => Promise<string | null>, signal?: AbortSignal): Promise<T> {
   const token = getAccessToken ? await getAccessToken() : null;
   const response = await fetch(url, {
@@ -428,7 +588,7 @@ async function authedJson<T>(url: string, getAccessToken?: () => Promise<string 
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { detail?: string; error?: string } | null;
-    throw new Error(payload?.detail || payload?.error || "Request failed.");
+    throw new Error(apiErrorMessage(payload, "Request failed."));
   }
 
   return (await response.json()) as T;
@@ -438,7 +598,8 @@ async function authedPostJson<T>(
   url: string,
   getAccessToken?: () => Promise<string | null>,
   body?: unknown,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  signal?: AbortSignal
 ): Promise<T> {
   const token = getAccessToken ? await getAccessToken() : null;
   const response = await fetch(url, {
@@ -449,30 +610,90 @@ async function authedPostJson<T>(
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...headers
     },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal
   });
-  const payload = (await response.json().catch(() => null)) as T | { detail?: string; error?: string } | null;
+  const payload = (await response.json().catch(() => null)) as T | ApiErrorPayload | null;
   if (!response.ok) {
-    throw new Error(
-      payload && typeof payload === "object" && ("detail" in payload || "error" in payload)
-        ? payload.detail || payload.error || "Request failed."
-        : "Request failed."
-    );
+    throw new ApiRequestError(payload && typeof payload === "object" ? (payload as ApiErrorPayload) : null);
   }
 
   return payload as T;
 }
 
+function claimErrorMessage(error: unknown) {
+  const message = apiErrorCode(error) || (error instanceof Error ? error.message.toLowerCase() : "");
+  if (message.includes("unauthorized") || message.includes("session expired")) {
+    return "Your wallet session has expired. Reconnect your wallet and try again.";
+  }
+  if (message.includes("already_claimed")) {
+    return "This ticket was already claimed. Your balance is being refreshed.";
+  }
+  if (message.includes("not_claimable") || message.includes("invalid_ticket_status")) {
+    return "This ticket is no longer ready to claim. Portfolio is refreshing with its latest status.";
+  }
+  if (message.includes("not_found")) {
+    return "This ticket is no longer available. Portfolio is refreshing.";
+  }
+  if (message.includes("idempotency")) {
+    return "This claim is already being processed. Check your available balance before retrying.";
+  }
+  if (message.includes("rate") && message.includes("limit")) {
+    return "Too many claim attempts. Wait a moment, then try again.";
+  }
+  return "We could not claim this ticket. Try again in a moment.";
+}
+
+function withdrawalRequestErrorMessage(error: unknown) {
+  const message = apiErrorCode(error) || (error instanceof Error ? error.message.toLowerCase() : "");
+  if (message.includes("unauthorized") || message.includes("session expired")) {
+    return "Your wallet session has expired. Reconnect your wallet and try again.";
+  }
+  if (message.includes("destination_wallet_not_linked")) {
+    return "This wallet is no longer verified for withdrawals. Reconnect it and try again.";
+  }
+  if (message.includes("insufficient_user_balance")) {
+    return "Your available LEGWORK balance changed. Review the updated balance and try again.";
+  }
+  if (message.includes("idempotency")) {
+    return "This withdrawal request is already being processed. Check your withdrawal history before retrying.";
+  }
+  if (message.includes("rate") && message.includes("limit")) {
+    return "Too many withdrawal requests. Wait a moment, then try again.";
+  }
+  return "We could not create this withdrawal request. Try again in a moment.";
+}
+
 function apiErrorMessage(payload: unknown, fallback: string) {
   if (!payload || typeof payload !== "object") return fallback;
   const item = payload as { detail?: string; error?: string };
-  if (item.detail) return item.detail;
   if (item.error === "unauthorized") return "Wallet session expired. Reconnect your wallet and try again.";
   if (item.error === "executable_price_unavailable") return "LEGWORK could not verify current executable prices for every selected leg. Retry in a moment.";
   if (item.error === "quote_pricing_timeout") return "LEGWORK could not refresh executable prices quickly enough. Retry in a moment.";
   if (item.error === "unknown_market_outcome") return "One selected market is no longer available. Refresh markets and rebuild the basket.";
-  if (item.error) return item.error.replace(/_/g, " ");
+  if (item.error === "financial_operations_unavailable") return "Payments are temporarily unavailable. Try again shortly.";
+  if (item.error === "payment_intent_expired" || item.error === "quote_expired") return "This quote expired. Refresh it before paying.";
   return fallback;
+}
+
+function apiErrorCode(error: unknown) {
+  if (error instanceof ApiRequestError && typeof error.payload?.error === "string") return error.payload.error.toLowerCase();
+  return "";
+}
+
+function claimErrorNeedsRefresh(error: unknown) {
+  const code = apiErrorCode(error);
+  return ["already_claimed", "not_claimable", "invalid_ticket_status", "not_found"].includes(code);
+}
+
+function isRecoverablePaymentResponse(value: unknown): value is RecoverablePaymentResponse {
+  if (!value || typeof value !== "object") return false;
+  const response = value as Partial<RecoverablePaymentResponse>;
+  return response.status === "recoverable" && response.error === "payment_intent_recoverable" && typeof response.reason === "string";
+}
+
+function recoverablePaymentMessage() {
+  return "This basket could not be activated. Received USDC was returned to your available LEGWORK balance. Open Portfolio to review the balance and current withdrawal status.";
 }
 
 function marketInitial(question: string) {
@@ -485,12 +706,54 @@ function sourceLabel(source: MarketOutcome["source"], marketUrl?: string) {
   return "Source unavailable";
 }
 
-function eventKey(marketUrl?: string) {
+function legacyEventKey(marketUrl?: string) {
   if (!marketUrl) return "";
   try {
     return new URL(marketUrl).pathname.replace(/\/$/, "");
   } catch {
     return marketUrl.replace(/\/$/, "");
+  }
+}
+
+function outcomeEventKey(outcome: Pick<MarketOutcome, "eventGroupKey" | "marketUrl" | "marketId">) {
+  if (outcome.eventGroupKey) return outcome.eventGroupKey;
+  const legacy = legacyEventKey(outcome.marketUrl);
+  return legacy ? `legacy:${legacy}` : `market:${outcome.marketId}`;
+}
+
+function rowEventKey(row: MarketRow) {
+  if (row.eventGroupKey) return row.eventGroupKey;
+  const legacy = legacyEventKey(row.marketUrl);
+  return legacy ? `legacy:${legacy}` : `market:${row.marketId}`;
+}
+
+function canonicalCategory(category?: string) {
+  switch ((category || "").trim().toLowerCase()) {
+    case "politics":
+      return "Politics";
+    case "sports":
+      return "Sports";
+    case "crypto":
+      return "Crypto";
+    case "finance and economy":
+    case "economics":
+    case "economy":
+    case "finance":
+      return "Finance and Economy";
+    case "technology and science":
+    case "technology":
+    case "science":
+      return "Technology and Science";
+    case "culture and entertainment":
+    case "culture":
+    case "entertainment":
+      return "Culture and Entertainment";
+    case "world and weather":
+    case "weather":
+    case "world":
+      return "World and Weather";
+    default:
+      return "Other";
   }
 }
 
@@ -511,19 +774,6 @@ function isEnded(value?: string) {
   return Number.isFinite(date.getTime()) && date.getTime() <= Date.now();
 }
 
-function balanceScore(row: MarketRow) {
-  return Math.min(...row.outcomes.map((outcome) => Math.abs(outcome.price - 0.5)));
-}
-
-function sortMarketRows(rows: MarketRow[], sortOrder: SortOrder) {
-  return [...rows].sort((a, b) => {
-    if (sortOrder === "ending") return timeValue(a.endDate) - timeValue(b.endDate);
-    if (sortOrder === "balanced") return balanceScore(a) - balanceScore(b);
-    if (sortOrder === "liquidity") return (b.liquidity || 0) - (a.liquidity || 0);
-    return (b.volume || 0) - (a.volume || 0);
-  });
-}
-
 function toMarketRows(outcomes: MarketOutcome[]): MarketRow[] {
   const rows = new Map<string, MarketRow>();
 
@@ -535,6 +785,9 @@ function toMarketRows(outcomes: MarketOutcome[]): MarketRow[] {
       current.liquidity = Math.max(current.liquidity || 0, outcome.liquidity || 0);
       current.image ||= outcome.image;
       current.icon ||= outcome.icon;
+      current.eventGroupKey ||= outcome.eventGroupKey;
+      current.eventTitle ||= outcome.eventTitle;
+      current.eventSlug ||= outcome.eventSlug;
       continue;
     }
 
@@ -542,45 +795,88 @@ function toMarketRows(outcomes: MarketOutcome[]): MarketRow[] {
       marketId: outcome.marketId,
       conditionId: outcome.conditionId,
       question: outcome.question,
-      category: outcome.category || "General",
+      category: canonicalCategory(outcome.category),
       endDate: outcome.endDate,
       volume: outcome.volume,
       liquidity: outcome.liquidity,
       image: outcome.image,
       icon: outcome.icon,
       marketUrl: outcome.marketUrl,
+      eventGroupKey: outcome.eventGroupKey,
+      eventTitle: outcome.eventTitle,
+      eventSlug: outcome.eventSlug,
       source: outcome.source,
       outcomes: [outcome]
     });
   }
 
-  const allRows = [...rows.values()].sort((a, b) => (b.volume || 0) - (a.volume || 0));
-  const promoted = allRows.filter((row) => /bitcoin|ethereum|hype|up or down/i.test(row.question)).slice(0, 10);
-  const promotedIds = new Set(promoted.map((row) => row.marketId));
-  const buckets = new Map<string, MarketRow[]>();
+  return [...rows.values()];
+}
 
-  for (const row of allRows.filter((item) => !promotedIds.has(item.marketId))) {
-    const key = row.category || "General";
-    buckets.set(key, [...(buckets.get(key) || []), row]);
+function toMarketEventSurfaces(rows: MarketRow[]): MarketEventSurface[] {
+  const groups = new Map<string, MarketRow[]>();
+  for (const row of rows) {
+    const key = rowEventKey(row);
+    groups.set(key, [...(groups.get(key) || []), row]);
   }
 
-  const preferredOrder = ["Crypto", "Sports", "Politics", "Economics", "Weather", "Technology", "General"];
-  const bucketOrder = [...preferredOrder, ...[...buckets.keys()].filter((key) => !preferredOrder.includes(key)).sort()];
-  const interleaved: MarketRow[] = [];
-  let hasRows = true;
-  while (hasRows) {
-    hasRows = false;
-    for (const key of bucketOrder) {
-      const bucket = buckets.get(key);
-      const next = bucket?.shift();
-      if (next) {
-        interleaved.push(next);
-        hasRows = true;
+  return [...groups.entries()].map(([key, groupRows]) => {
+    const first = groupRows[0];
+    const structured = Boolean(first.eventGroupKey);
+    const eventTitle = first.eventTitle || (groupRows.length > 1 ? commonEventTitle(groupRows) : first.question);
+    return {
+      key,
+      structured,
+      rows: groupRows,
+      category: first.category,
+      eventTitle,
+      image: first.image,
+      icon: first.icon,
+      marketUrl: first.marketUrl,
+      volume: groupRows.reduce((sum, row) => sum + (row.volume || 0), 0),
+      liquidity: groupRows.reduce((sum, row) => sum + (row.liquidity || 0), 0),
+      endDate: groupRows
+        .map((row) => row.endDate)
+        .filter((value): value is string => Boolean(value))
+        .sort((left, right) => timeValue(left) - timeValue(right))[0],
+      marketCount: groupRows.length
+    };
+  });
+}
+
+function commonEventTitle(rows: MarketRow[]) {
+  const title = rows.find((row) => row.eventTitle)?.eventTitle;
+  if (title) return title;
+  const firstUrl = rows[0]?.marketUrl;
+  if (firstUrl) {
+    try {
+      const slug = new URL(firstUrl).pathname.split("/").filter(Boolean).at(-1);
+      if (slug) {
+        return slug
+          .split("-")
+          .filter(Boolean)
+          .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+          .join(" ");
       }
+    } catch {
+      // Fall through to the first question.
     }
   }
+  return rows[0]?.question || "Related markets";
+}
 
-  return [...promoted, ...interleaved];
+function marketQueryFingerprint(query: MarketCatalogQuery) {
+  return JSON.stringify({
+    limit: query.limit,
+    search: query.search || "",
+    category: query.category || "All",
+    sort: query.sort || "volume",
+    eventGroupKey: query.eventGroupKey || ""
+  });
+}
+
+function eventSiblingListId(eventKey: string) {
+  return `event-siblings-${eventKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 export default function App({ auth }: AppProps = {}) {
@@ -591,8 +887,18 @@ export default function App({ auth }: AppProps = {}) {
   const [marketError, setMarketError] = useState("");
   const [marketRefreshKey, setMarketRefreshKey] = useState(0);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [category, setCategory] = useState("All");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("popular");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("volume");
+  const [nextMarketCursor, setNextMarketCursor] = useState<string | undefined>();
+  const [marketTotal, setMarketTotal] = useState<number | undefined>();
+  const [marketHasMore, setMarketHasMore] = useState(false);
+  const [loadingMoreMarkets, setLoadingMoreMarkets] = useState(false);
+  const [paginationIssue, setPaginationIssue] = useState<PaginationIssue | null>(null);
+  const [expandedEvents, setExpandedEvents] = useState<Set<string>>(() => new Set());
+  const [expandedSiblingLimits, setExpandedSiblingLimits] = useState<Record<string, number>>({});
+  const [selectionNotice, setSelectionNotice] = useState("");
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
   const [legs, setLegs] = useState<ParlayLeg[]>([]);
   const [amount, setAmount] = useState(0);
   const [amountInput, setAmountInput] = useState("");
@@ -612,14 +918,22 @@ export default function App({ auth }: AppProps = {}) {
   const [paymentState, setPaymentState] = useState<PaymentFlowState>("idle");
   const [paymentError, setPaymentError] = useState("");
   const [paymentTxHash, setPaymentTxHash] = useState("");
+  const [paymentClockNow, setPaymentClockNow] = useState(() => Date.now());
   const [accountState, setAccountState] = useState<AccountDataState>("idle");
   const [accountError, setAccountError] = useState("");
   const [ticketListState, setTicketListState] = useState<AccountDataState>("idle");
   const [ticketListError, setTicketListError] = useState("");
   const [withdrawalError, setWithdrawalError] = useState("");
+  const [withdrawalAmountInput, setWithdrawalAmountInput] = useState("");
+  const [withdrawalRequestState, setWithdrawalRequestState] = useState<"idle" | "submitting" | "success" | "error">("idle");
+  const [withdrawalRequestMessage, setWithdrawalRequestMessage] = useState("");
+  const [cancelingWithdrawalId, setCancelingWithdrawalId] = useState<string | null>(null);
   const [pendingPaymentsError, setPendingPaymentsError] = useState("");
   const [accountSummary, setAccountSummary] = useState<AccountSummary | null>(null);
   const [tickets, setTickets] = useState<TicketSummary[]>([]);
+  const [claimableTickets, setClaimableTickets] = useState<TicketSummary[]>([]);
+  const [claimableTicketListState, setClaimableTicketListState] = useState<AccountDataState>("idle");
+  const [claimableTicketListError, setClaimableTicketListError] = useState("");
   const [pendingPayments, setPendingPayments] = useState<PendingPaymentSummary[]>([]);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [ticketDetail, setTicketDetail] = useState<TicketDetail | null>(null);
@@ -627,35 +941,403 @@ export default function App({ auth }: AppProps = {}) {
   const [ticketDetailError, setTicketDetailError] = useState("");
   const [ticketDetailRefreshKey, setTicketDetailRefreshKey] = useState(0);
   const [withdrawals, setWithdrawals] = useState<WithdrawalSummary[]>([]);
+  const [claimingTicketId, setClaimingTicketId] = useState<string | null>(null);
+  const [claimNotice, setClaimNotice] = useState("");
+  const [claimError, setClaimError] = useState("");
   const [accountRefreshKey, setAccountRefreshKey] = useState(0);
   const lastPayoutRef = useRef<string | null>(null);
+  const marketGenerationRef = useRef(0);
+  const marketFingerprintRef = useRef("");
+  const marketRequestControllerRef = useRef<AbortController | null>(null);
+  const activeAppendCursorRef = useRef<string | undefined>(undefined);
+  const consumedMarketCursorsRef = useRef<Set<string>>(new Set());
+  const mobileBasketDialogRef = useRef<HTMLDivElement | null>(null);
+  const mobileBasketCloseRef = useRef<HTMLButtonElement | null>(null);
+  const mobileBasketTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const mobileBasketReturnFocusRef = useRef<HTMLElement | null>(null);
+  const paymentModalDialogRef = useRef<HTMLElement | null>(null);
+  const paymentModalCloseRef = useRef<HTMLButtonElement | null>(null);
+  const paymentModalReturnFocusRef = useRef<HTMLElement | null>(null);
+  const ticketDetailPanelRef = useRef<HTMLElement | null>(null);
+  const paymentModalOpenRef = useRef(false);
+  const paymentReviewCanCloseRef = useRef(true);
+  const claimableRequestControllerRef = useRef<AbortController | null>(null);
+  const claimRequestControllerRef = useRef<AbortController | null>(null);
+  const claimInFlightRef = useRef(new Set<string>());
+  const claimAttemptKeysRef = useRef(new Map<string, string>());
+  const claimScopeRef = useRef("");
+  const withdrawalAttemptRef = useRef<{ key: string; signature: string } | null>(null);
+  const paymentReviewCanClose = paymentState !== "sending" && paymentState !== "activating";
+  paymentReviewCanCloseRef.current = paymentReviewCanClose;
+  const authIdentity = auth?.enabled ? (auth.authenticated ? auth.userLabel || "connected-wallet" : "signed-out") : "local-session";
 
   useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedQuery(query), 260);
+    return () => window.clearTimeout(timeout);
+  }, [query]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 720px)");
+    const updateViewport = () => setIsMobileViewport(query.matches);
+    updateViewport();
+    query.addEventListener("change", updateViewport);
+    return () => query.removeEventListener("change", updateViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!paymentModalOpen || !paymentIntent) return;
+    setPaymentClockNow(Date.now());
+    const interval = window.setInterval(() => setPaymentClockNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [paymentIntent, paymentModalOpen]);
+
+  useEffect(() => {
+    if (!isMobileViewport || activeView !== "portfolio" || !selectedTicketId) return;
+    const timeout = window.setTimeout(() => {
+      ticketDetailPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [activeView, isMobileViewport, selectedTicketId]);
+
+  const closeMobileBasket = useCallback(() => setMobileBasketOpen(false), []);
+  const openMobileBasket = useCallback(() => {
+    mobileBasketReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : mobileBasketTriggerRef.current;
+    setMobileBasketOpen(true);
+  }, []);
+
+  const closePaymentReview = useCallback(() => {
+    if (!paymentReviewCanCloseRef.current) return;
+    paymentModalOpenRef.current = false;
+    setPaymentModalOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileBasketOpen) return;
+    const dialog = mobileBasketDialogRef.current;
+    const returnFocus = mobileBasketReturnFocusRef.current || mobileBasketTriggerRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    mobileBasketCloseRef.current?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (paymentModalOpenRef.current) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMobileBasket();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )].filter((element) => element.getClientRects().length > 0 && element.getAttribute("aria-hidden") !== "true");
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement;
+      if (event.shiftKey && (activeElement === first || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (activeElement === last || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleDialogKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (!paymentModalOpenRef.current && returnFocus?.isConnected) returnFocus.focus();
+    };
+  }, [closeMobileBasket, mobileBasketOpen]);
+
+  useEffect(() => {
+    if (!paymentModalOpen) return;
+    paymentModalOpenRef.current = true;
+    const dialog = paymentModalDialogRef.current;
+    const returnFocus = paymentModalReturnFocusRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    paymentModalCloseRef.current?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!paymentReviewCanCloseRef.current) return;
+        event.preventDefault();
+        closePaymentReview();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )].filter((element) => element.getClientRects().length > 0 && element.getAttribute("aria-hidden") !== "true");
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement;
+      if (event.shiftKey && (activeElement === first || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (activeElement === last || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleDialogKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (returnFocus?.isConnected) returnFocus.focus();
+    };
+  }, [closePaymentReview, paymentModalOpen]);
+
+  const marketQuery = useMemo<MarketCatalogQuery>(() => {
+    const search = debouncedQuery.trim();
+    return {
+      limit: marketPageSize,
+      ...(search ? { search } : {}),
+      ...(category === "All" ? {} : { category: canonicalCategory(category) }),
+      sort: sortOrder
+    };
+  }, [category, debouncedQuery, sortOrder]);
+  const currentMarketFingerprint = useMemo(() => marketQueryFingerprint(marketQuery), [marketQuery]);
+
+  const loadMarketCatalogPage = useCallback(
+    async (mode: "reset" | "append", cursor?: string) => {
+      const generation = marketGenerationRef.current;
+      const fingerprint = marketFingerprintRef.current;
+
+      if (fingerprint !== currentMarketFingerprint) return;
+      if (mode === "append") {
+        if (!cursor) return;
+        if (consumedMarketCursorsRef.current.has(cursor)) {
+          setMarketHasMore(false);
+          setPaginationIssue({
+            kind: "duplicate",
+            cursor,
+            message: "Pagination repeated a page cursor. Loading more has stopped to prevent duplicate markets."
+          });
+          return;
+        }
+        activeAppendCursorRef.current = cursor;
+        setLoadingMoreMarkets(true);
+        setPaginationIssue(null);
+      } else {
+        setMarketError("");
+      }
+
+      marketRequestControllerRef.current?.abort();
+      const controller = new AbortController();
+      marketRequestControllerRef.current = controller;
+
+      const requestIsCurrent = () =>
+        !controller.signal.aborted &&
+        marketGenerationRef.current === generation &&
+        marketFingerprintRef.current === fingerprint &&
+        (mode === "reset" || activeAppendCursorRef.current === cursor);
+
+      try {
+        const catalog = await fetchMarketCatalog(controller.signal, {
+          ...marketQuery,
+          ...(mode === "append" && cursor ? { cursor } : {})
+        });
+        if (!requestIsCurrent()) return;
+
+        const catalogAge = ageMs(catalog.asOf);
+        const freshOutcomes = catalog.outcomes || [];
+        const returnedCursor = catalog.pageInfo ? catalog.pageInfo.nextCursor : catalog.nextCursor;
+        const nextCursor = typeof returnedCursor === "string" && returnedCursor.trim() ? returnedCursor.trim() : undefined;
+        const serverHasMore = catalog.pageInfo ? catalog.pageInfo.hasMore : Boolean(nextCursor);
+        const malformedPagination = catalog.pageInfo?.hasMore === true && !nextCursor;
+        const duplicateCursor =
+          mode === "append" &&
+          Boolean(nextCursor && (nextCursor === cursor || consumedMarketCursorsRef.current.has(nextCursor)));
+
+        if (mode === "append" && cursor) consumedMarketCursorsRef.current.add(cursor);
+        setMarketCatalog(catalog);
+        setOutcomes((current) => {
+          if (mode === "reset") return freshOutcomes;
+          const byId = new Map<string, MarketOutcome>();
+          for (const outcome of current) byId.set(outcome.id, outcome);
+          for (const outcome of freshOutcomes) byId.set(outcome.id, outcome);
+          return [...byId.values()];
+        });
+        setNextMarketCursor(nextCursor);
+        setMarketHasMore(serverHasMore && !malformedPagination && !duplicateCursor);
+        setMarketTotal((current) => catalog.pageInfo?.total ?? current);
+        setFetchState(
+          catalog.complete === false || (catalogAge !== undefined && catalogAge > marketCatalogStaleAfterMs)
+            ? "fallback"
+            : "live"
+        );
+
+        if (malformedPagination) {
+          setPaginationIssue({
+            kind: "malformed",
+            cursor: "",
+            message: "Pagination response is missing its next cursor. Loading more has stopped. Retry the catalog."
+          });
+        } else if (duplicateCursor && cursor) {
+          setPaginationIssue({
+            kind: "duplicate",
+            cursor,
+            message: "Pagination returned a cursor that was already used. Loading more has stopped to prevent duplicates."
+          });
+        } else {
+          setPaginationIssue(null);
+        }
+      } catch (error: unknown) {
+        if (!requestIsCurrent()) return;
+        const message = error instanceof Error ? error.message : "Live market catalog unavailable.";
+        if (mode === "reset") {
+          setMarketCatalog(null);
+          setOutcomes([]);
+          setNextMarketCursor(undefined);
+          setMarketHasMore(false);
+          setMarketTotal(undefined);
+          setFetchState("error");
+          setMarketError(message);
+        } else if (cursor) {
+          setMarketHasMore(false);
+          setPaginationIssue({
+            kind: "request",
+            cursor,
+            message: `${message} The markets already loaded are still available.`
+          });
+        }
+      } finally {
+        if (marketRequestControllerRef.current === controller) marketRequestControllerRef.current = null;
+        if (mode === "append" && activeAppendCursorRef.current === cursor && generation === marketGenerationRef.current) {
+          setLoadingMoreMarkets(false);
+        }
+      }
+    },
+    [currentMarketFingerprint, marketQuery]
+  );
+
+  useEffect(() => {
+    marketRequestControllerRef.current?.abort();
+    const generation = marketGenerationRef.current + 1;
+    marketGenerationRef.current = generation;
+    marketFingerprintRef.current = currentMarketFingerprint;
+    activeAppendCursorRef.current = undefined;
+    consumedMarketCursorsRef.current = new Set();
+    setFetchState("loading");
+    setOutcomes([]);
+    setMarketCatalog(null);
+    setNextMarketCursor(undefined);
+    setMarketHasMore(false);
+    setMarketTotal(undefined);
+    setLoadingMoreMarkets(false);
+    setMarketError("");
+    setPaginationIssue(null);
+    setExpandedEvents(new Set());
+    setExpandedSiblingLimits({});
+    void loadMarketCatalogPage("reset");
+
+    return () => {
+      if (marketGenerationRef.current === generation) marketRequestControllerRef.current?.abort();
+    };
+  }, [currentMarketFingerprint, loadMarketCatalogPage, marketRefreshKey]);
+
+  useEffect(() => {
+    claimableRequestControllerRef.current?.abort();
+    claimRequestControllerRef.current?.abort();
+    claimScopeRef.current = authIdentity;
+    claimInFlightRef.current.clear();
+    claimAttemptKeysRef.current.clear();
+    setClaimingTicketId(null);
+    setClaimNotice("");
+    setClaimError("");
+  }, [authIdentity]);
+
+  useEffect(() => {
+    const shouldLoadClaimableTickets = !auth?.enabled || auth.authenticated;
+    claimableRequestControllerRef.current?.abort();
+
+    if (!shouldLoadClaimableTickets) {
+      setClaimableTickets([]);
+      setClaimableTicketListState("idle");
+      setClaimableTicketListError("");
+      return;
+    }
+
     let isMounted = true;
     const controller = new AbortController();
-    setFetchState("loading");
-    setMarketError("");
-    fetchMarketCatalog(controller.signal)
-      .then((catalog) => {
-        if (!isMounted) return;
-        const catalogAge = ageMs(catalog.asOf);
-        setMarketCatalog(catalog);
-        setOutcomes(catalog.outcomes);
-        setFetchState(catalog.complete === false || (catalogAge !== undefined && catalogAge > marketCatalogStaleAfterMs) ? "fallback" : "live");
-      })
-      .catch((error: unknown) => {
-        if (!isMounted) return;
-        setMarketCatalog(null);
-        setOutcomes([]);
-        setMarketError(error instanceof Error ? error.message : "Live market catalog unavailable.");
-        setFetchState("error");
-      });
+    const requestIdentity = authIdentity;
+    const ticketsById = new Map<string, TicketSummary>();
+    const consumedCursors = new Set<string>();
+    claimableRequestControllerRef.current = controller;
+    setClaimableTickets([]);
+    setClaimableTicketListState("loading");
+    setClaimableTicketListError("");
+
+    void (async () => {
+      let cursor: string | undefined;
+      for (let page = 0; page < maxClaimableTicketPages; page += 1) {
+        const params = new URLSearchParams({ limit: String(claimableTicketPageSize) });
+        if (cursor) params.set("cursor", cursor);
+        const response = await authedJson<ClaimableTicketPage<TicketSummary>>(
+          `/api/tickets/claimable?${params.toString()}`,
+          auth?.getAccessToken,
+          controller.signal
+        );
+        if (!isMounted || controller.signal.aborted || claimScopeRef.current !== requestIdentity) return;
+
+        for (const ticket of response.tickets || []) {
+          if (ticket.status === "claimable" && !ticketsById.has(ticket.ticketId)) ticketsById.set(ticket.ticketId, ticket);
+        }
+        setClaimableTickets([...ticketsById.values()]);
+
+        const nextCursor = response.pageInfo?.nextCursor?.trim() || undefined;
+        if (!response.pageInfo?.hasMore) {
+          setClaimableTicketListState("ready");
+          return;
+        }
+        if (!nextCursor) {
+          setClaimableTicketListState("error");
+          setClaimableTicketListError("Claimable tickets could not be fully loaded. Refresh your portfolio to try again.");
+          return;
+        }
+        if (consumedCursors.has(nextCursor)) {
+          setClaimableTicketListState("error");
+          setClaimableTicketListError("Claimable ticket pagination repeated a page. Refresh your portfolio to try again.");
+          return;
+        }
+        consumedCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+
+      if (!controller.signal.aborted && isMounted && claimScopeRef.current === requestIdentity) {
+        setClaimableTicketListState("error");
+        setClaimableTicketListError("Claimable tickets could not be fully loaded. Refresh your portfolio to try again.");
+      }
+    })().catch(() => {
+      if (!isMounted || controller.signal.aborted || claimScopeRef.current !== requestIdentity) return;
+      setClaimableTicketListState("error");
+      setClaimableTicketListError("Claimable tickets could not be loaded. Refresh your portfolio to try again.");
+    });
 
     return () => {
       isMounted = false;
       controller.abort();
+      if (claimableRequestControllerRef.current === controller) claimableRequestControllerRef.current = null;
     };
-  }, [marketRefreshKey]);
+  }, [accountRefreshKey, auth?.enabled, auth?.authenticated, auth?.getAccessToken, authIdentity]);
 
   useEffect(() => {
     const shouldLoadAccount = !auth?.enabled || auth.authenticated;
@@ -751,7 +1433,7 @@ export default function App({ auth }: AppProps = {}) {
       isMounted = false;
       controller.abort();
     };
-  }, [accountRefreshKey, auth?.enabled, auth?.authenticated, auth?.walletSynced, auth?.getAccessToken]);
+  }, [accountRefreshKey, auth?.enabled, auth?.authenticated, auth?.walletSynced, auth?.getAccessToken, authIdentity]);
 
   useEffect(() => {
     if (ticketListState !== "ready" || selectedTicketId || tickets.length === 0) return;
@@ -801,12 +1483,7 @@ export default function App({ auth }: AppProps = {}) {
 
   const marketRows = useMemo(() => toMarketRows(outcomes), [outcomes]);
 
-  const categories = useMemo(() => {
-    const present = new Set(marketRows.map((row) => row.category || "General"));
-    const ordered = categoryOrder.filter((item) => item === "All" || present.has(item));
-    const rest = [...present].filter((item) => !ordered.includes(item)).sort();
-    return [...ordered, ...rest];
-  }, [marketRows]);
+  const categories = categoryOrder;
 
   const selectedByMarket = useMemo(() => {
     const selected = new Map<string, ParlayLeg>();
@@ -814,33 +1491,30 @@ export default function App({ auth }: AppProps = {}) {
     return selected;
   }, [legs]);
 
-  const coveredEventKeys = useMemo(() => {
-    const covered = new Set<string>();
-    for (const leg of legs) {
-      const key = eventKey(leg.marketUrl);
-      if (key) covered.add(key);
-    }
-    return covered;
+  const selectedByEvent = useMemo(() => {
+    const selected = new Map<string, ParlayLeg>();
+    for (const leg of legs) selected.set(outcomeEventKey(leg), leg);
+    return selected;
   }, [legs]);
 
-  const filteredRows = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
+  const visibleRows = useMemo(() => {
+    const normalizedQuery = debouncedQuery.trim().toLowerCase();
     const rows = marketRows
       .filter((row) => category === "All" || row.category === category)
       .filter((row) => !isEnded(row.endDate))
-      .filter((row) => {
-        const key = eventKey(row.marketUrl);
-        return !key || !coveredEventKeys.has(key) || selectedByMarket.has(row.marketId);
-      })
       .filter((row) => {
         if (!normalizedQuery) return true;
         return `${row.question} ${row.outcomes.map((outcome) => outcome.outcome).join(" ")} ${row.category}`
           .toLowerCase()
           .includes(normalizedQuery);
       });
-    return sortMarketRows(rows, sortOrder).slice(0, marketDisplayLimit);
-  }, [category, coveredEventKeys, marketRows, query, selectedByMarket, sortOrder]);
+    return rows;
+  }, [category, debouncedQuery, marketRows]);
+  const marketEventSurfaces = useMemo(() => toMarketEventSurfaces(visibleRows), [visibleRows]);
   const hasMarketFilters = query.trim().length > 0 || category !== "All";
+  const loadedMarketCount = marketRows.length;
+  const marketCountLabel =
+    marketTotal !== undefined ? `${loadedMarketCount}/${marketTotal} loaded` : `${loadedMarketCount} loaded`;
   const marketCatalogAge = ageMs(marketCatalog?.asOf);
   const marketCatalogStale = marketCatalogAge !== undefined && marketCatalogAge > marketCatalogStaleAfterMs;
   const marketCatalogPartial = marketCatalog?.complete === false;
@@ -857,6 +1531,8 @@ export default function App({ auth }: AppProps = {}) {
   const currentBasketKey = useMemo(() => basketSignature(amount, legs), [amount, legs]);
   const activeServerQuote = serverQuoteBasketKey === currentBasketKey ? serverQuote : null;
   const hasBasketQuote = legs.length >= 2;
+  const hasBuyAmount = amount > 0;
+  const authoritativeQuote = activeServerQuote?.status === "quoted" ? activeServerQuote : null;
   const walletSyncStatus = auth?.walletSyncStatus || (auth?.walletSynced ? "synced" : "idle");
   const walletSyncFailed = Boolean(auth?.enabled && auth.authenticated && walletSyncStatus === "error");
   const walletSyncLimited = Boolean(auth?.enabled && auth.authenticated && !auth.walletSynced && walletSyncStatus === "limited");
@@ -874,43 +1550,95 @@ export default function App({ auth }: AppProps = {}) {
             : auth.walletUsdcBalance === null || auth.walletUsdcBalance === undefined
               ? "—"
               : `${formatNumber(auth.walletUsdcBalance)} USDC`;
-  const canDraft = legs.length >= 2 && amount > 0 && risk.decision !== "reject" && walletReadyForCheckout;
-  const canUseCheckoutAction = canDraft || (walletSyncFailed && hasBasketQuote);
-  const payoutDisplay = !hasBasketQuote ? "—" : risk.decision === "reject" ? "Unavailable" : formatUsd(parlay.grossPayout);
-  const mobilePayoutDisplay = hasBasketQuote ? `${payoutDisplay} potential` : "Add one more";
-  const basketPriceDisplay = hasBasketQuote ? formatCents(parlay.impliedProbability || 0) : "—";
-  const basketProbabilityDisplay = hasBasketQuote ? formatPercent(parlay.impliedProbability || 0) : "—";
-  const quoteSpreadDisplay = hasBasketQuote ? formatPercent(parlay.houseEdge) : "—";
-  const payoutMultipleDisplay = hasBasketQuote ? `${formatNumber(parlay.offeredDecimalOdds || 0)}x` : "—";
+  const basketReadyForCheckout = legs.length >= 2 && amount > 0 && risk.decision !== "reject";
+  const canDraft = basketReadyForCheckout && walletReadyForCheckout;
+  const canUseCheckoutAction =
+    (basketReadyForCheckout && (!auth?.enabled || !auth.authenticated || walletReadyForCheckout)) ||
+    (walletSyncFailed && hasBasketQuote && hasBuyAmount);
+  const quoteUnavailable = serverQuoteState === "error" && !authoritativeQuote;
+  const payoutDisplay = !hasBasketQuote || !hasBuyAmount
+    ? "—"
+    : quoteUnavailable
+      ? "Unavailable"
+    : authoritativeQuote
+      ? formatUsd(authoritativeQuote.potentialPayoutUsd)
+      : risk.decision === "reject"
+        ? "Unavailable"
+        : formatUsd(parlay.grossPayout);
+  const mobilePayoutDisplay =
+    legs.length === 0
+      ? "Add two markets"
+      : legs.length === 1
+        ? "Add one more"
+        : !hasBuyAmount
+          ? "Enter buy amount"
+          : quoteUnavailable
+            ? "Quote unavailable"
+          : `${payoutDisplay} potential`;
+  const basketPriceDisplay = hasBasketQuote
+    ? quoteUnavailable
+      ? "Unavailable"
+      : formatCents(authoritativeQuote?.basketPrice ?? parlay.impliedProbability ?? 0)
+    : "—";
+  const basketProbabilityDisplay = hasBasketQuote
+    ? quoteUnavailable
+      ? "Unavailable"
+      : formatPercent(authoritativeQuote?.basketProbability ?? parlay.impliedProbability ?? 0)
+    : "—";
+  const quoteSpreadDisplay = hasBasketQuote
+    ? quoteUnavailable
+      ? "Unavailable"
+      : formatPercent(authoritativeQuote?.quoteSpread ?? parlay.houseEdge)
+    : "—";
+  const payoutMultipleDisplay = hasBasketQuote
+    ? quoteUnavailable
+      ? "Unavailable"
+      : `${formatNumber(authoritativeQuote?.payoutMultiple ?? parlay.offeredDecimalOdds ?? 0)}x`
+    : "—";
+  const operationFeeDisplay = hasBuyAmount
+    ? formatUsd(authoritativeQuote?.operationFeeUsd ?? parlay.operationFee)
+    : "—";
+  const totalCostDisplay = hasBuyAmount
+    ? formatUsd(authoritativeQuote?.totalCostUsd ?? parlay.totalCost)
+    : formatUsd(0);
+  const quoteValueQualifier =
+    hasBasketQuote && hasBuyAmount && !authoritativeQuote && !quoteUnavailable
+      ? serverQuoteState === "loading"
+        ? " checking"
+        : " estimate"
+      : "";
   const visibleRiskChecks = useMemo(() => {
     const priority = { block: 0, warn: 1, ok: 2 };
     return [...risk.checks].sort((a, b) => priority[a.level] - priority[b.level]).slice(0, 4);
   }, [risk.checks]);
   useEffect(() => {
-    if (!hasBasketQuote) {
+    if (!hasBasketQuote || !hasBuyAmount || payoutDisplay === "—" || payoutDisplay === "Unavailable") {
       lastPayoutRef.current = null;
       return;
     }
     if (lastPayoutRef.current === null) {
       lastPayoutRef.current = payoutDisplay;
+      setBurstKey((key) => key + 1);
       return;
     }
     if (lastPayoutRef.current !== payoutDisplay) {
       lastPayoutRef.current = payoutDisplay;
       setBurstKey((key) => key + 1);
     }
-  }, [hasBasketQuote, payoutDisplay]);
+  }, [hasBasketQuote, hasBuyAmount, payoutDisplay]);
   const checkoutLabel =
     !hasBasketQuote
+      ? "Review basket"
+      : !hasBuyAmount
       ? "Review basket"
       : auth?.enabled && !auth.authenticated
       ? "Connect wallet"
       : walletSyncFailed
-      ? "Reconnect wallet"
+      ? "Disconnect wallet"
       : !walletReadyForCheckout
       ? "Syncing wallet"
       : risk.decision === "reject"
-      ? "Basket blocked"
+      ? "Basket unavailable"
       : paymentState === "loading"
         ? "Preparing review"
       : paymentState === "sending"
@@ -941,6 +1669,7 @@ export default function App({ auth }: AppProps = {}) {
     setPaymentState("idle");
     setPaymentError("");
     setPaymentTxHash("");
+    paymentModalOpenRef.current = false;
     setPaymentModalOpen(false);
   }, [amount, legs]);
 
@@ -951,17 +1680,38 @@ export default function App({ auth }: AppProps = {}) {
     return () => window.clearTimeout(timeout);
   }, [stakeLimitKey]);
 
+  useEffect(() => {
+    if (!selectionNotice) return;
+    const timeout = window.setTimeout(() => setSelectionNotice(""), 2800);
+    return () => window.clearTimeout(timeout);
+  }, [selectionNotice]);
+
   function chooseOutcome(outcome: MarketOutcome) {
-    setLegs((current) => {
-      const outcomeEventKey = eventKey(outcome.marketUrl);
-      const withoutMarket = current.filter((leg) => {
-        if (leg.marketId === outcome.marketId) return false;
-        return !(outcomeEventKey && eventKey(leg.marketUrl) === outcomeEventKey);
+    const outcomeKey = outcomeEventKey(outcome);
+    const replaced = legs.find((leg) => outcomeEventKey(leg) === outcomeKey && leg.id !== outcome.id);
+    const existing = legs.find((leg) => leg.id === outcome.id);
+    const withoutEvent = legs.filter((leg) => outcomeEventKey(leg) !== outcomeKey);
+
+    if (existing) {
+      setLegs(withoutEvent);
+      setSelectionNotice(`Removed ${outcome.outcome} from ${outcome.eventTitle || outcome.question}.`);
+      return;
+    }
+
+    setLegs([...withoutEvent, { ...outcome, addedAt: Date.now() }]);
+    setSelectionNotice(
+      replaced
+        ? `Replaced ${replaced.question} (${replaced.outcome}) with ${outcome.question} (${outcome.outcome}).`
+        : `Selected ${outcome.outcome} for ${outcome.eventTitle || outcome.question}.`
+    );
+    window.setTimeout(() => {
+      setExpandedEvents((current) => {
+        if (!current.has(outcomeKey)) return current;
+        const next = new Set(current);
+        next.delete(outcomeKey);
+        return next;
       });
-      const existing = current.find((leg) => leg.id === outcome.id);
-      if (existing) return withoutMarket;
-      return [...withoutMarket, { ...outcome, addedAt: Date.now() }];
-    });
+    }, 0);
   }
 
   function removeLeg(id: string) {
@@ -1061,6 +1811,7 @@ export default function App({ auth }: AppProps = {}) {
   async function preparePaymentReview() {
     if (!canDraft || paymentState === "loading") return;
 
+    paymentModalOpenRef.current = true;
     setPaymentModalOpen(true);
     setPaymentState("loading");
     setPaymentError("");
@@ -1086,7 +1837,12 @@ export default function App({ auth }: AppProps = {}) {
       const intent = await authedPostJson<ServerPaymentIntent>(`/api/quotes/${quote.id}/payment-intent`, auth?.getAccessToken);
       setPaymentIntent(intent);
       setPaymentTxHash(intent.txHash || "");
-      setPaymentState(intent.status === "confirmed" || intent.status === "activated" ? "pending" : "ready");
+      if (intent.status === "recoverable") {
+        setPaymentState("recoverable");
+        setPaymentError(recoverablePaymentMessage());
+      } else {
+        setPaymentState(intent.status === "confirmed" || intent.status === "activated" ? "pending" : "ready");
+      }
     } catch (error) {
       setPaymentIntent(null);
       setPaymentState("error");
@@ -1099,7 +1855,7 @@ export default function App({ auth }: AppProps = {}) {
     setPaymentState("activating");
     setPaymentError("");
     try {
-      const payload = await authedPostJson<ServerTicket | { status: "payment_pending"; paymentIntent?: ServerPaymentIntent; detail?: string }>(
+      const payload = await authedPostJson<ServerTicket | { status: "payment_pending"; paymentIntent?: ServerPaymentIntent; detail?: string } | RecoverablePaymentResponse>(
         `/api/quotes/${quoteId}/payment-activate`,
         auth?.getAccessToken
       );
@@ -1107,9 +1863,17 @@ export default function App({ auth }: AppProps = {}) {
         setServerTicket(payload);
         setServerTicketState("ready");
         setPaymentState("complete");
+        setBurstKey((key) => key + 1);
         setSelectedTicketId(payload.ticketId);
         setAccountRefreshKey((key) => key + 1);
         setActiveView("portfolio");
+        return;
+      }
+      if (isRecoverablePaymentResponse(payload)) {
+        if (payload.paymentIntent) setPaymentIntent(payload.paymentIntent);
+        setPaymentState("recoverable");
+        setPaymentError(recoverablePaymentMessage());
+        setAccountRefreshKey((key) => key + 1);
         return;
       }
       if (payload.paymentIntent) setPaymentIntent(payload.paymentIntent);
@@ -1117,6 +1881,13 @@ export default function App({ auth }: AppProps = {}) {
       setPaymentError(payload.detail || "Waiting for confirmed USDC payment.");
       setAccountRefreshKey((key) => key + 1);
     } catch (error) {
+      if (error instanceof ApiRequestError && isRecoverablePaymentResponse(error.payload)) {
+        if (error.payload.paymentIntent) setPaymentIntent(error.payload.paymentIntent);
+        setPaymentState("recoverable");
+        setPaymentError(recoverablePaymentMessage());
+        setAccountRefreshKey((key) => key + 1);
+        return;
+      }
       setServerTicket(null);
       setServerTicketState("error");
       setServerTicketError(error instanceof Error ? error.message : "Ticket activation unavailable.");
@@ -1136,11 +1907,26 @@ export default function App({ auth }: AppProps = {}) {
       setPaymentError("Connected wallet payment is unavailable. Reconnect your wallet and try again.");
       return;
     }
+    if (!walletReadyForCheckout || !auth.getAccessToken) {
+      setPaymentState("error");
+      setPaymentError("Your wallet session is no longer verified. Reconnect your wallet before sending USDC.");
+      return;
+    }
 
     setPaymentState("sending");
     setPaymentError("");
     let submittedTxHash = "";
     try {
+      // Refresh authentication immediately before the irreversible wallet action.
+      const accessToken = await auth.getAccessToken();
+      if (!accessToken) {
+        throw new Error("Your wallet session expired before payment. Reconnect your wallet and try again.");
+      }
+      if (paymentIntent.status === "expired" || new Date(paymentIntent.expiresAt).getTime() <= Date.now()) {
+        setPaymentState("error");
+        setPaymentError("This payment quote expired. Refresh the quote before sending USDC.");
+        return;
+      }
       const txHash = await auth.sendUsdcPayment({
         treasuryAddress: paymentIntent.treasuryAddress,
         usdcContractAddress: paymentIntent.usdcContractAddress,
@@ -1151,7 +1937,7 @@ export default function App({ auth }: AppProps = {}) {
       setPaymentTxHash(txHash);
       const submitted = await authedPostJson<ServerPaymentIntent>(
         `/api/quotes/${paymentIntent.quoteId}/payment-transaction`,
-        auth?.getAccessToken,
+        async () => accessToken,
         { txHash }
       );
       setPaymentIntent(submitted);
@@ -1159,6 +1945,13 @@ export default function App({ auth }: AppProps = {}) {
       setAccountRefreshKey((key) => key + 1);
       await activatePaidQuote(submitted.quoteId);
     } catch (error) {
+      if (error instanceof ApiRequestError && isRecoverablePaymentResponse(error.payload)) {
+        if (error.payload.paymentIntent) setPaymentIntent(error.payload.paymentIntent);
+        setPaymentState("recoverable");
+        setPaymentError(recoverablePaymentMessage());
+        setAccountRefreshKey((key) => key + 1);
+        return;
+      }
       setPaymentState("error");
       setPaymentError(
         submittedTxHash
@@ -1192,31 +1985,67 @@ export default function App({ auth }: AppProps = {}) {
       setAccountRefreshKey((key) => key + 1);
       await activatePaidQuote(submitted.quoteId);
     } catch (error) {
+      if (error instanceof ApiRequestError && isRecoverablePaymentResponse(error.payload)) {
+        if (error.payload.paymentIntent) setPaymentIntent(error.payload.paymentIntent);
+        setPaymentState("recoverable");
+        setPaymentError(recoverablePaymentMessage());
+        setAccountRefreshKey((key) => key + 1);
+        return;
+      }
       setPaymentState("error");
       setPaymentError(error instanceof Error ? error.message : "LEGWORK could not continue activation.");
     }
   }
 
   function handleCheckout() {
+    if (auth?.enabled && !auth.authenticated) {
+      setMobileBasketOpen(false);
+      auth.login?.();
+      return;
+    }
     if (walletSyncFailed) {
       auth?.logout?.();
       return;
     }
 
+    paymentModalReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    void preparePaymentReview();
+  }
+
+  function refreshPaymentQuote() {
+    setPaymentIntent(null);
+    setPaymentTxHash("");
+    setPaymentError("");
+    setPaymentState("idle");
     void preparePaymentReview();
   }
 
   function openPortfolioFromPayment() {
-    setPaymentModalOpen(false);
+    closePaymentReview();
     setActiveView("portfolio");
     setAccountRefreshKey((key) => key + 1);
   }
 
   const activeTickets = tickets.filter((ticket) => ticket.status === "accepted" || ticket.status === "live");
   const confirmingPayments = pendingPayments.filter((payment) => payment.status === "submitted" || payment.status === "confirmed");
+  const recoverablePayments = pendingPayments.filter((payment) => payment.status === "recoverable");
   const activeBasketCount = activeTickets.length + confirmingPayments.length;
   const allBasketCount = tickets.length + confirmingPayments.length;
   const availableBalance = balanceFor(accountSummary, ["user_usdc_available"], "USDC");
+  const availableBalanceMicroUnits = availableUsdcMicroUnits(availableBalance);
+  const withdrawalDestination = auth?.walletAddress?.trim() || "";
+  const withdrawalAmountMicroUnits = parseUsdcMicroUnits(withdrawalAmountInput);
+  const withdrawalAmountError = useMemo(() => {
+    if (!withdrawalDestination) return "Connect and verify a wallet before requesting a withdrawal.";
+    if (accountState === "loading" || accountState === "idle") return "Available LEGWORK balance is loading.";
+    if (accountState === "error" || !accountSummary) return "Available LEGWORK balance is unavailable.";
+    if (!withdrawalAmountInput) return "Enter an amount to withdraw.";
+    if (withdrawalAmountMicroUnits === null) return "Use up to six decimal places.";
+    if (withdrawalAmountMicroUnits <= 0n) return "Enter an amount greater than zero.";
+    if (withdrawalAmountMicroUnits > availableBalanceMicroUnits) return "Amount exceeds your available LEGWORK balance.";
+    return "";
+  }, [accountState, accountSummary, availableBalanceMicroUnits, withdrawalAmountInput, withdrawalAmountMicroUnits, withdrawalDestination]);
+  const canSubmitWithdrawal = !withdrawalAmountError && withdrawalRequestState !== "submitting";
   const walletDisplayBalance = auth?.walletBalanceState === "ready" ? auth.walletUsdcBalance : undefined;
   const walletBalanceMetric =
     auth?.enabled && !auth.authenticated
@@ -1269,7 +2098,7 @@ export default function App({ auth }: AppProps = {}) {
             {auth.walletSyncError || "LEGWORK could not verify this session. Reconnect your wallet to continue."}
           </span>
           <button className="primary-inline-btn" onClick={auth.logout} type="button">
-            Reconnect wallet
+            Disconnect wallet
           </button>
         </div>
       );
@@ -1280,39 +2109,64 @@ export default function App({ auth }: AppProps = {}) {
 
   function renderPaymentModal() {
     if (!paymentModalOpen) return null;
-    const amountDue = paymentIntent ? formatUsd(paymentIntent.amountUsdc) : formatUsd(parlay.totalCost);
+    const amountDue = paymentIntent ? formatUsd(paymentIntent.amountUsdc) : totalCostDisplay;
     const txHash = paymentTxHash || paymentIntent?.txHash || "";
     const explorerUrl = txHash ? txExplorerUrl(txHash, paymentIntent?.chainId) : "";
     const paymentNetwork = chainLabel(paymentIntent?.chainId || configuredSettlementChainId());
-    const netProfit = Math.max(0, parlay.grossPayout - parlay.totalCost);
-    const profitReturn = parlay.totalCost > 0 ? netProfit / parlay.totalCost : 0;
+    const quotedPayout = authoritativeQuote?.potentialPayoutUsd ?? parlay.grossPayout;
+    const quotedTotal = authoritativeQuote?.totalCostUsd ?? parlay.totalCost;
+    const netProfit = Math.max(0, quotedPayout - quotedTotal);
+    const profitReturn = quotedTotal > 0 ? netProfit / quotedTotal : 0;
+    const quoteAdjusted = Boolean(
+      authoritativeQuote && Math.abs(authoritativeQuote.potentialPayoutUsd - parlay.grossPayout) >= 0.01
+    );
+    const paymentLegs = authoritativeQuote?.legs?.length ? authoritativeQuote.legs : legs;
     const paymentBusy = paymentState === "loading" || paymentState === "sending" || paymentState === "activating";
+    const paymentRecoverable = paymentState === "recoverable";
+    const paymentComplete = paymentState === "complete";
+    const reviewUnavailable = paymentState === "error" && !paymentIntent && !txHash;
+    const paymentIntentExpired = Boolean(
+      paymentIntent &&
+        (paymentIntent.status === "expired" || new Date(paymentIntent.expiresAt).getTime() <= paymentClockNow)
+    );
     const canSend = Boolean(
       paymentIntent &&
+        walletReadyForCheckout &&
+        auth?.sendUsdcPayment &&
         !txHash &&
         paymentState !== "loading" &&
         paymentState !== "sending" &&
         paymentState !== "activating" &&
         paymentState !== "pending" &&
+        !paymentRecoverable &&
+        !paymentIntentExpired &&
         paymentState !== "complete"
     );
-    const canContinueActivation = Boolean(paymentIntent && txHash && paymentState === "error");
+    const canContinueActivation = Boolean(paymentIntent && txHash && paymentState === "error" && !paymentRecoverable);
 
     return (
       <div className="payment-modal-backdrop" role="presentation">
-        <section className="payment-modal" role="dialog" aria-modal="true" aria-labelledby="payment-modal-title">
+        <section
+          className="payment-modal"
+          ref={paymentModalDialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="payment-modal-title"
+          tabIndex={-1}
+        >
           <div className="payment-modal-header">
             <div>
               <span className="section-label">
-                <ReceiptText size={16} />
-                Review ticket
+                {paymentComplete ? <Trophy size={16} /> : <ReceiptText size={16} />}
+                {paymentComplete ? "Basket confirmed" : "Review ticket"}
               </span>
-              <h2 id="payment-modal-title">Buy this basket</h2>
+              <h2 id="payment-modal-title">{paymentComplete ? "Your basket is live" : "Buy this basket"}</h2>
             </div>
             <button
               className="icon-btn quiet"
-              disabled={paymentState === "sending" || paymentState === "activating"}
-              onClick={() => setPaymentModalOpen(false)}
+              ref={paymentModalCloseRef}
+              disabled={!paymentReviewCanClose}
+              onClick={closePaymentReview}
               type="button"
               aria-label="Close payment review"
             >
@@ -1321,61 +2175,102 @@ export default function App({ auth }: AppProps = {}) {
           </div>
 
           <div className="payment-hero">
-            <span>Total due</span>
-            <strong>{amountDue}</strong>
-            <small>Stake plus operation fees, paid in USDC on {paymentNetwork}.</small>
+            <span>{paymentComplete ? "Confirmed potential payout" : `Total due${quoteValueQualifier}`}</span>
+            {paymentComplete ? (
+              <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
+            ) : (
+              <strong>{reviewUnavailable ? "Unavailable" : amountDue}</strong>
+            )}
+            <small>
+              {paymentComplete
+                ? `Your ${paymentLegs.length}-pick basket is now tracking every result.`
+                : `Stake plus operation fees, paid in USDC on ${paymentNetwork}.`}
+            </small>
+            {authoritativeQuote ? (
+              <small className="payment-quote-update">
+                {quoteAdjusted ? "Quote updated with current market prices." : "Live quote confirmed."}
+              </small>
+            ) : null}
           </div>
 
           <div className="payment-leg-list">
-            {legs.map((leg) => (
+            {paymentLegs.map((leg) => (
               <div className="payment-leg" key={leg.id}>
                 <span>{leg.outcome} · {formatCents(leg.price)}</span>
                 <strong>{leg.question}</strong>
+                <small>Closes {contractCloseDateTime(leg.endDate)}</small>
+                {leg.marketUrl ? (
+                  <a href={leg.marketUrl} target="_blank" rel="noreferrer">
+                    View market rules <ExternalLink size={12} />
+                  </a>
+                ) : null}
               </div>
             ))}
           </div>
 
           <div className="payment-grid">
             <div>
-              <span>Potential payout</span>
-              <strong>{payoutDisplay}</strong>
+              <span>Potential payout{quoteValueQualifier}</span>
+              <AnimatedPayout value={reviewUnavailable ? "Unavailable" : payoutDisplay} burstKey={burstKey} compact />
             </div>
             <div>
-              <span>Basket price</span>
-              <strong>{basketPriceDisplay}</strong>
+              <span>Basket price{quoteValueQualifier}</span>
+              <strong>{reviewUnavailable ? "Unavailable" : basketPriceDisplay}</strong>
             </div>
             <div>
-              <span>Network</span>
-              <strong>{paymentNetwork}</strong>
+              <span>Quote spread{quoteValueQualifier}</span>
+              <strong>{reviewUnavailable ? "Unavailable" : quoteSpreadDisplay}</strong>
             </div>
             <div>
-              <span>Profit return</span>
-              <strong>+{formatPercent(profitReturn)}</strong>
+              <span>Payout multiple{quoteValueQualifier}</span>
+              <strong>{reviewUnavailable ? "Unavailable" : payoutMultipleDisplay}</strong>
+            </div>
+            <div>
+              <span>Operation fee{quoteValueQualifier}</span>
+              <strong>{reviewUnavailable ? "—" : operationFeeDisplay}</strong>
+            </div>
+            <div>
+              <span>Profit return{quoteValueQualifier}</span>
+              <strong>{reviewUnavailable ? "—" : `+${formatPercent(profitReturn)}`}</strong>
             </div>
           </div>
 
           {paymentIntent ? (
-            <div className="payment-addresses">
-              <div>
-                <span>Treasury</span>
-                <strong>{compactId(paymentIntent.treasuryAddress)}</strong>
+            <>
+              <div className={paymentIntentExpired ? "payment-expiry expired" : "payment-expiry"} role="status">
+                <Clock3 size={15} />
+                <strong>
+                  {paymentIntentExpired ? "Quote expired" : `Send within ${expiryCountdown(paymentIntent.expiresAt, paymentClockNow)}`}
+                </strong>
               </div>
-              <div>
-                <span>USDC contract</span>
-                <strong>{compactId(paymentIntent.usdcContractAddress)}</strong>
-              </div>
-              <div>
-                <span>Quote expires</span>
-                <strong>{shortDateTime(paymentIntent.expiresAt)}</strong>
-              </div>
-            </div>
-          ) : null}
-
-          {txHash ? (
-            <a className="payment-tx-link" href={explorerUrl} target="_blank" rel="noreferrer">
-              <ExternalLink size={15} />
-              View transfer {compactId(txHash)}
-            </a>
+              <details className="payment-technical">
+                <summary>Transaction details</summary>
+                <div className="payment-addresses">
+                  <div>
+                    <span>Network</span>
+                    <strong>{paymentNetwork}</strong>
+                  </div>
+                  <div>
+                    <span>Treasury</span>
+                    <strong>{compactId(paymentIntent.treasuryAddress)}</strong>
+                  </div>
+                  <div>
+                    <span>USDC contract</span>
+                    <strong>{compactId(paymentIntent.usdcContractAddress)}</strong>
+                  </div>
+                  <div>
+                    <span>Expires</span>
+                    <strong>{shortDateTime(paymentIntent.expiresAt)}</strong>
+                  </div>
+                </div>
+                {txHash ? (
+                  <a className="payment-tx-link" href={explorerUrl} target="_blank" rel="noreferrer">
+                    <ExternalLink size={15} />
+                    View transfer {compactId(txHash)}
+                  </a>
+                ) : null}
+              </details>
+            </>
           ) : null}
 
           {paymentState === "pending" ? (
@@ -1388,14 +2283,25 @@ export default function App({ auth }: AppProps = {}) {
           ) : null}
 
           <div className="payment-actions">
-            {paymentState === "pending" ? (
+            {paymentIntentExpired && !txHash ? (
+              <button className="checkout-btn" onClick={refreshPaymentQuote} type="button">
+                <RefreshCw size={18} />
+                Refresh quote
+              </button>
+            ) : reviewUnavailable ? (
+              <button className="checkout-btn" onClick={refreshPaymentQuote} type="button">
+                <RefreshCw size={18} />
+                Retry quote
+              </button>
+            ) : paymentState === "pending" || paymentRecoverable ? (
               <button className="checkout-btn" onClick={openPortfolioFromPayment} type="button">
                 <LayoutDashboard size={18} />
                 View Portfolio
               </button>
             ) : paymentState === "complete" ? (
-              <button className="checkout-btn" onClick={() => setPaymentModalOpen(false)} type="button">
-                Basket live
+              <button className="checkout-btn" onClick={openPortfolioFromPayment} type="button">
+                <LayoutDashboard size={18} />
+                View live basket
               </button>
             ) : canContinueActivation ? (
               <button className="checkout-btn" onClick={continuePaymentActivation} type="button">
@@ -1420,12 +2326,122 @@ export default function App({ auth }: AppProps = {}) {
     );
   }
 
+  async function claimTicketWinnings(ticketId: string) {
+    if (claimInFlightRef.current.has(ticketId) || claimingTicketId) return;
+    const requestIdentity = authIdentity;
+    const idempotencyKey = claimAttemptKeysRef.current.get(ticketId) || `ticket-claim-${crypto.randomUUID()}`;
+    claimAttemptKeysRef.current.set(ticketId, idempotencyKey);
+    claimInFlightRef.current.add(ticketId);
+    claimRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    claimRequestControllerRef.current = controller;
+    setClaimingTicketId(ticketId);
+    setClaimNotice("");
+    setClaimError("");
+
+    try {
+      const result = await authedPostJson<TicketClaimResult>(
+        `/api/tickets/${ticketId}/claim`,
+        auth?.getAccessToken,
+        undefined,
+        { "idempotency-key": idempotencyKey },
+        controller.signal
+      );
+      if (controller.signal.aborted || claimScopeRef.current !== requestIdentity) return;
+      const claimedUsd = Number(BigInt(result.amountMicroUnits)) / 1_000_000;
+      setClaimNotice(`${formatUsd(claimedUsd)} moved to your available LEGWORK balance.`);
+      claimAttemptKeysRef.current.delete(ticketId);
+      setAccountRefreshKey((key) => key + 1);
+      if (selectedTicketId === ticketId) setTicketDetailRefreshKey((key) => key + 1);
+    } catch (error: unknown) {
+      if (!controller.signal.aborted && claimScopeRef.current === requestIdentity) {
+        setClaimError(claimErrorMessage(error));
+        if (claimErrorNeedsRefresh(error)) {
+          setAccountRefreshKey((key) => key + 1);
+          if (selectedTicketId === ticketId) setTicketDetailRefreshKey((key) => key + 1);
+        }
+      }
+    } finally {
+      claimInFlightRef.current.delete(ticketId);
+      if (!controller.signal.aborted && claimScopeRef.current === requestIdentity) setClaimingTicketId(null);
+      if (claimRequestControllerRef.current === controller) claimRequestControllerRef.current = null;
+    }
+  }
+
+  function updateWithdrawalAmount(value: string) {
+    if (value !== withdrawalAmountInput) withdrawalAttemptRef.current = null;
+    setWithdrawalAmountInput(value);
+    if (withdrawalRequestState !== "idle") {
+      setWithdrawalRequestState("idle");
+      setWithdrawalRequestMessage("");
+    }
+  }
+
+  async function requestWithdrawal() {
+    if (!canSubmitWithdrawal || withdrawalAmountMicroUnits === null || !withdrawalDestination) return;
+
+    const requestIdentity = authIdentity;
+    const signature = `${withdrawalDestination.toLowerCase()}:${withdrawalAmountMicroUnits.toString()}`;
+    const existingAttempt = withdrawalAttemptRef.current;
+    const idempotencyKey =
+      existingAttempt?.signature === signature ? existingAttempt.key : `withdrawal-${crypto.randomUUID()}`;
+    withdrawalAttemptRef.current = { key: idempotencyKey, signature };
+    setWithdrawalRequestState("submitting");
+    setWithdrawalRequestMessage("Submitting withdrawal request to treasury.");
+
+    try {
+      await authedPostJson<{ id: string; status: string }>(
+        "/api/withdrawals",
+        auth?.getAccessToken,
+        {
+          amountUsdc: formatUsdcMicroUnits(withdrawalAmountMicroUnits),
+          destinationAddress: withdrawalDestination
+        },
+        { "idempotency-key": idempotencyKey }
+      );
+      if (claimScopeRef.current !== requestIdentity) return;
+      withdrawalAttemptRef.current = null;
+      setWithdrawalAmountInput("");
+      setWithdrawalRequestState("success");
+      setWithdrawalRequestMessage("Withdrawal request received. Treasury processing is pending; funds have not been sent yet.");
+      setAccountRefreshKey((key) => key + 1);
+    } catch (error: unknown) {
+      if (claimScopeRef.current !== requestIdentity) return;
+      setWithdrawalRequestState("error");
+      setWithdrawalRequestMessage(withdrawalRequestErrorMessage(error));
+    }
+  }
+
+  async function cancelRequestedWithdrawal(withdrawalId: string) {
+    if (cancelingWithdrawalId) return;
+    const requestIdentity = authIdentity;
+    setCancelingWithdrawalId(withdrawalId);
+    setWithdrawalError("");
+
+    try {
+      await authedPostJson<{ id: string; status: "canceled" }>(
+        `/api/withdrawals/${encodeURIComponent(withdrawalId)}/cancel`,
+        auth?.getAccessToken,
+        {}
+      );
+      if (claimScopeRef.current !== requestIdentity) return;
+      setAccountRefreshKey((key) => key + 1);
+    } catch (error) {
+      if (claimScopeRef.current === requestIdentity) {
+        setWithdrawalError(apiErrorMessage(error instanceof ApiRequestError ? error.payload : undefined, "Withdrawal could not be canceled."));
+      }
+    } finally {
+      if (claimScopeRef.current === requestIdentity) setCancelingWithdrawalId(null);
+    }
+  }
+
   function renderTicketDetailPanel() {
     const selectedSummary = tickets.find((ticket) => ticket.ticketId === selectedTicketId);
     const detailStatus = ticketDetail?.status || selectedSummary?.status;
+    const voidRefund = ticketDetail ? isVoidedRefundTicket(ticketDetail) : selectedSummary ? isVoidedRefundTicket(selectedSummary) : false;
 
     return (
-      <section className="account-panel ticket-detail-panel">
+      <section className="account-panel ticket-detail-panel" ref={ticketDetailPanelRef}>
         <div className="panel-title-row">
           <div>
             <span className="section-label">
@@ -1434,7 +2450,11 @@ export default function App({ auth }: AppProps = {}) {
             </span>
             <h2>{selectedSummary ? compactId(selectedSummary.ticketId) : "Select a basket"}</h2>
           </div>
-          {detailStatus ? <em className={`status-pill ${statusTone(detailStatus)}`}>{statusLabel(detailStatus)}</em> : null}
+          {detailStatus ? (
+            <em className={`status-pill ${statusTone(voidRefund ? "voided" : detailStatus)}`}>
+              {voidRefund ? "Refund ready" : statusLabel(detailStatus)}
+            </em>
+          ) : null}
         </div>
 
         {ticketListState === "error" ? (
@@ -1461,8 +2481,8 @@ export default function App({ auth }: AppProps = {}) {
                 <strong>{formatUsd(ticketDetail.amountPaidUsd)}</strong>
               </div>
               <div>
-                <span>Potential payout</span>
-                <strong>{formatUsd(ticketDetail.potentialPayoutUsd)}</strong>
+                <span>{voidRefund ? "Refund" : "Potential payout"}</span>
+                <strong>{formatUsd(voidRefund ? ticketDetail.claimableAmountUsd || ticketDetail.stakeUsd : ticketDetail.potentialPayoutUsd)}</strong>
               </div>
               <div>
                 <span>Stake</span>
@@ -1473,6 +2493,23 @@ export default function App({ auth }: AppProps = {}) {
                 <strong>{formatUsd(ticketDetail.operationFeeUsd)}</strong>
               </div>
             </div>
+            {ticketDetail.status === "claimable" ? (
+              <div className="claim-action">
+                <div>
+                  <span>{voidRefund ? "Refund ready" : "Ready to claim"}</span>
+                  <strong>{formatUsd(ticketDetail.claimableAmountUsd || 0)}</strong>
+                  {voidRefund ? <small>Stake returned; operation fee is not refunded.</small> : null}
+                </div>
+                <button
+                  disabled={claimingTicketId !== null}
+                  onClick={() => void claimTicketWinnings(ticketDetail.ticketId)}
+                  type="button"
+                >
+                  <Trophy size={17} />
+                  {claimingTicketId === ticketDetail.ticketId ? "Claiming" : voidRefund ? "Claim refund" : "Claim winnings"}
+                </button>
+              </div>
+            ) : null}
             <div className="ticket-progress-line">
               <strong>{legProgressText(ticketDetail) || `${ticketDetail.legs.length} active`}</strong>
               <span>Opened {shortDateTime(ticketDetail.createdAt)} · {ticketDetail.currency}</span>
@@ -1494,7 +2531,11 @@ export default function App({ auth }: AppProps = {}) {
                   <div>
                     <span>{leg.outcome}</span>
                     <strong>{leg.question}</strong>
-                    <small>{settlementDetailText(leg)}</small>
+                    <small>{settlementSummaryText(leg, ticketDetail.status)}</small>
+                    <details className="settlement-diagnostics">
+                      <summary>Settlement details</summary>
+                      <small>{settlementDetailText(leg)}</small>
+                    </details>
                     {leg.marketUrl ? (
                       <a href={leg.marketUrl} target="_blank" rel="noreferrer">
                         Open market <ExternalLink size={12} />
@@ -1527,8 +2568,30 @@ export default function App({ auth }: AppProps = {}) {
           <span>
             {payment.legs} leg{payment.legs === 1 ? "" : "s"} · paid {formatUsd(payment.amountPaidUsd)} · {progressText}
           </span>
+          {payment.txHash ? (
+            <a className="compact-tx-link" href={txExplorerUrl(payment.txHash, payment.chainId)} target="_blank" rel="noreferrer">
+              Transaction {compactId(payment.txHash)} <ExternalLink size={12} />
+            </a>
+          ) : null}
         </div>
         <em className="status-pill confirming">Confirming</em>
+      </div>
+    );
+  }
+
+  function renderRecoverablePaymentRow(payment: PendingPaymentSummary) {
+    return (
+      <div className="account-row" key={payment.id}>
+        <div>
+          <strong>{formatUsd(payment.amountPaidUsd)} released</strong>
+          <span>{payment.legs} leg{payment.legs === 1 ? "" : "s"} · USDC returned to LEGWORK balance</span>
+          {payment.txHash ? (
+            <a className="compact-tx-link" href={txExplorerUrl(payment.txHash, payment.chainId)} target="_blank" rel="noreferrer">
+              Transaction {compactId(payment.txHash)} <ExternalLink size={12} />
+            </a>
+          ) : null}
+        </div>
+        <em className="status-pill paid">Returned</em>
       </div>
     );
   }
@@ -1541,6 +2604,57 @@ export default function App({ auth }: AppProps = {}) {
         <span>{ticketListError || "LEGWORK could not load basket history."}</span>
         <button onClick={() => setAccountRefreshKey((key) => key + 1)} type="button">Retry</button>
       </div>
+    );
+  }
+
+  function renderClaimPanel() {
+    return (
+      <section className="account-panel claim-panel" id="claimable-baskets">
+        <div className="panel-title-row">
+          <div>
+            <span className="section-label">
+              <Trophy size={16} />
+              Winnings
+            </span>
+            <h2>Ready to claim</h2>
+          </div>
+          <span className="panel-count">{claimableTickets.length}</span>
+        </div>
+        {claimableTicketListError ? <div className="scoped-warning" role="alert">{claimableTicketListError}</div> : null}
+        {claimError ? <div className="scoped-warning" role="alert">{claimError}</div> : null}
+        {claimableTicketListState === "loading" ? (
+          <AccountSkeleton rows={2} />
+        ) : claimableTickets.length > 0 ? (
+          <div className="account-list">
+            {claimableTickets.map((ticket) => (
+              <div className="account-row claim-row" key={ticket.ticketId}>
+                <div>
+                  <strong>
+                    {isVoidedRefundTicket(ticket) ? "Refund ready · " : ""}{formatUsd(ticket.claimableAmountUsd || 0)}
+                  </strong>
+                  <span>{isVoidedRefundTicket(ticket)
+                    ? "Stake returned; operation fee is not refunded."
+                    : `${ticket.legs} leg${ticket.legs === 1 ? "" : "s"} · ${shortDateTime(ticket.updatedAt || ticket.createdAt)}`}
+                  </span>
+                </div>
+                <button
+                  className="claim-ticket-btn"
+                  disabled={claimingTicketId !== null}
+                  onClick={() => void claimTicketWinnings(ticket.ticketId)}
+                  type="button"
+                >
+                  {claimingTicketId === ticket.ticketId ? "Claiming" : isVoidedRefundTicket(ticket) ? "Claim refund" : "Claim"}
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="panel-empty">
+            <Trophy size={22} />
+            <span>No winnings ready to claim.</span>
+          </div>
+        )}
+      </section>
     );
   }
 
@@ -1586,6 +2700,8 @@ export default function App({ auth }: AppProps = {}) {
           </div>
         ) : null}
 
+        {claimNotice ? <div className="scoped-success" role="status" aria-live="polite">{claimNotice}</div> : null}
+
         <div className="dashboard-grid">
           <div className="metric-card primary">
             <span>Wallet USDC</span>
@@ -1608,6 +2724,8 @@ export default function App({ auth }: AppProps = {}) {
             <small>{openLiabilityCopy}</small>
           </div>
         </div>
+
+        {isMobileViewport && claimableTickets.length > 0 ? renderClaimPanel() : null}
 
         <div className="account-columns">
           <section className="account-panel">
@@ -1644,7 +2762,9 @@ export default function App({ auth }: AppProps = {}) {
                         {legProgressText(ticket) || `bought ${shortDateTime(ticket.createdAt)}`}
                       </span>
                     </div>
-                    <em className={`status-pill ${statusTone(ticket.status)}`}>{statusLabel(ticket.status)}</em>
+                    <em className={`status-pill ${statusTone(isVoidedRefundTicket(ticket) ? "voided" : ticket.status)}`}>
+                      {isVoidedRefundTicket(ticket) ? "Refund ready" : statusLabel(ticket.status)}
+                    </em>
                   </button>
                 ))}
               </div>
@@ -1665,11 +2785,34 @@ export default function App({ auth }: AppProps = {}) {
         </div>
 
         <div className="activity-grid">
+          {!isMobileViewport || claimableTickets.length === 0 ? renderClaimPanel() : null}
+
+          {recoverablePayments.length > 0 ? (
+            <section className="account-panel">
+              <div className="panel-title-row">
+                <div>
+                  <span className="section-label">
+                    <Banknote size={16} />
+                    Released payments
+                  </span>
+                  <h2>Returned balance</h2>
+                </div>
+                <span className="panel-count">{recoverablePayments.length}</span>
+              </div>
+              <div className="scoped-success" role="status">
+                Received USDC was returned to your available LEGWORK balance. Review the withdrawal section for current availability.
+              </div>
+              <div className="account-list">
+                {recoverablePayments.map((payment) => renderRecoverablePaymentRow(payment))}
+              </div>
+            </section>
+          ) : null}
+
           <section className="account-panel">
             <div className="panel-title-row">
               <div>
                 <span className="section-label">Tickets</span>
-                <h2>All baskets</h2>
+                <h2>Recent baskets</h2>
               </div>
               <span className="panel-count">{ticketListState === "error" ? "!" : allBasketCount}</span>
             </div>
@@ -1687,7 +2830,11 @@ export default function App({ auth }: AppProps = {}) {
                     type="button"
                   >
                     <div>
-                      <strong>{formatUsd(ticket.potentialPayoutUsd || 0)} potential</strong>
+                      <strong>
+                        {isVoidedRefundTicket(ticket)
+                          ? `${formatUsd(ticket.claimableAmountUsd || ticket.stakeUsd || 0)} refund`
+                          : `${formatUsd(ticket.potentialPayoutUsd || 0)} potential`}
+                      </strong>
                       <span>
                         {ticket.legs} leg{ticket.legs === 1 ? "" : "s"} · paid {formatUsd(ticket.amountPaidUsd || 0)} ·{" "}
                         {legProgressText(ticket) || shortDateTime(ticket.createdAt)}
@@ -1717,6 +2864,74 @@ export default function App({ auth }: AppProps = {}) {
               </div>
               <span className="panel-count">{withdrawals.length}</span>
             </div>
+            <form
+              className="withdrawal-request"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void requestWithdrawal();
+              }}
+            >
+              <div className="withdrawal-balance">
+                <div>
+                  <span>Available LEGWORK USDC</span>
+                  <strong>{accountMetric(availableBalance)}</strong>
+                </div>
+                <button
+                  disabled={withdrawalRequestState === "submitting" || accountSummaryLoading || accountSummaryUnavailable}
+                  onClick={() => updateWithdrawalAmount(formatUsdcInput(availableBalance))}
+                  type="button"
+                >
+                  Max
+                </button>
+              </div>
+              <label className="withdrawal-field" htmlFor="withdrawal-amount">
+                <span>Amount</span>
+                <div className="withdrawal-input-wrap">
+                  <input
+                    aria-describedby="withdrawal-amount-help"
+                    autoComplete="off"
+                    disabled={withdrawalRequestState === "submitting"}
+                    id="withdrawal-amount"
+                    inputMode="decimal"
+                    onChange={(event) => updateWithdrawalAmount(event.target.value)}
+                    placeholder="0.000000"
+                    value={withdrawalAmountInput}
+                  />
+                  <strong>USDC</strong>
+                </div>
+              </label>
+              <div className="withdrawal-destination">
+                <span>Destination</span>
+                {withdrawalDestination ? (
+                  <strong title={withdrawalDestination}>{compactId(withdrawalDestination)}</strong>
+                ) : (
+                  <strong>Wallet verification required</strong>
+                )}
+              </div>
+              <div className="withdrawal-form-footer">
+                <span id="withdrawal-amount-help">
+                  {withdrawalAmountError || "Requests move available LEGWORK USDC to your verified wallet after treasury processing."}
+                </span>
+                <button className="withdrawal-submit" disabled={!canSubmitWithdrawal} type="submit">
+                  {withdrawalRequestState === "submitting" ? "Requesting" : "Request withdrawal"}
+                </button>
+              </div>
+              {withdrawalRequestState === "submitting" ? (
+                <div className="scoped-warning withdrawal-request-status" role="status" aria-live="polite">
+                  {withdrawalRequestMessage}
+                </div>
+              ) : null}
+              {withdrawalRequestState === "success" ? (
+                <div className="scoped-success withdrawal-request-status" role="status" aria-live="polite">
+                  {withdrawalRequestMessage}
+                </div>
+              ) : null}
+              {withdrawalRequestState === "error" ? (
+                <div className="scoped-warning withdrawal-request-status" role="alert">
+                  {withdrawalRequestMessage}
+                </div>
+              ) : null}
+            </form>
             {withdrawalError ? <div className="scoped-warning">{withdrawalError}</div> : null}
             {accountState === "loading" ? (
               <AccountSkeleton rows={4} />
@@ -1727,8 +2942,30 @@ export default function App({ auth }: AppProps = {}) {
                     <div>
                       <strong>{formatUsd(withdrawal.amountUsdc)}</strong>
                       <span>{compactId(withdrawal.destinationAddress)} · {shortDateTime(withdrawal.createdAt)}</span>
+                      {withdrawal.onchainTxHash ? (
+                        <a
+                          className="compact-tx-link"
+                          href={txExplorerUrl(withdrawal.onchainTxHash, withdrawal.chainId)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Transaction {compactId(withdrawal.onchainTxHash)} <ExternalLink size={12} />
+                        </a>
+                      ) : null}
                     </div>
-                    <em className={`status-pill ${statusTone(withdrawal.status)}`}>{statusLabel(withdrawal.status)}</em>
+                    <div className="withdrawal-row-actions">
+                      <em className={`status-pill ${statusTone(withdrawal.status)}`}>{statusLabel(withdrawal.status)}</em>
+                      {withdrawal.status === "requested" ? (
+                        <button
+                          className="withdrawal-cancel"
+                          disabled={cancelingWithdrawalId !== null}
+                          onClick={() => void cancelRequestedWithdrawal(withdrawal.id)}
+                          type="button"
+                        >
+                          {cancelingWithdrawalId === withdrawal.id ? "Canceling" : "Cancel"}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1751,9 +2988,157 @@ export default function App({ auth }: AppProps = {}) {
     return "other";
   }
 
+  function renderMarketRow(row: MarketRow, variant: "normal" | "sibling" = "normal") {
+    const selected = selectedByMarket.get(row.marketId);
+    const content = (
+      <>
+        <div className="market-image" aria-hidden="true">
+          {row.icon || row.image ? <img src={row.icon || row.image} alt="" /> : <span>{marketInitial(row.question)}</span>}
+        </div>
+        <div className="market-main">
+          <div className="market-meta">
+            <span>{row.category}</span>
+            <span>{dateLabel(row.endDate)}</span>
+            <span>Vol {compactUsd(row.volume)}</span>
+          </div>
+          <h2>{row.question}</h2>
+          {row.marketUrl ? (
+            <a href={row.marketUrl} target="_blank" rel="noreferrer" className="market-source-link">
+              {sourceLabel(row.source, row.marketUrl)}
+              <ExternalLink size={13} />
+            </a>
+          ) : (
+            <span className="market-source-note">{sourceLabel(row.source, row.marketUrl)}</span>
+          )}
+        </div>
+        <div className="outcome-grid">
+          {row.outcomes.map((outcome) => {
+            const isSelected = selected?.id === outcome.id;
+            return (
+              <button
+                className={`outcome-btn ${outcomeTone(outcome.outcome)}${isSelected ? " selected" : ""}`}
+                onClick={() => chooseOutcome(outcome)}
+                key={outcome.id}
+                aria-pressed={isSelected}
+              >
+                <span>{outcome.outcome}</span>
+                <strong>{formatCents(outcome.price)}</strong>
+              </button>
+            );
+          })}
+        </div>
+      </>
+    );
+
+    if (variant === "sibling") {
+      return (
+        <div className={selected ? "event-sibling-row chosen" : "event-sibling-row"} key={row.marketId} role="listitem">
+          {content}
+        </div>
+      );
+    }
+
+    return (
+      <article className={selected ? "market-card chosen" : "market-card"} key={row.marketId}>
+        {content}
+      </article>
+    );
+  }
+
+  function renderEventSurface(surface: MarketEventSurface) {
+    if (surface.marketCount === 1) return renderMarketRow(surface.rows[0]);
+
+    const expanded = expandedEvents.has(surface.key);
+    const selected = selectedByEvent.get(surface.key);
+    const initialLimit = isMobileViewport ? 5 : 8;
+    const siblingLimit = expandedSiblingLimits[surface.key] || initialLimit;
+    const visibleSiblingRows = expanded ? surface.rows.slice(0, siblingLimit) : [];
+    const hasMoreSiblings = expanded && siblingLimit < surface.rows.length;
+    const siblingListId = eventSiblingListId(surface.key);
+
+    return (
+      <article className={selected ? "event-card chosen" : "event-card"} key={surface.key}>
+        <div className="event-header">
+          <div className="market-image event-image" aria-hidden="true">
+            {surface.icon || surface.image ? (
+              <img src={surface.icon || surface.image} alt="" />
+            ) : (
+              <span>{marketInitial(surface.eventTitle)}</span>
+            )}
+          </div>
+          <div className="event-main">
+            <div className="market-meta">
+              <span>{surface.category}</span>
+              <span>{surface.marketCount} markets</span>
+              <span>Vol {compactUsd(surface.volume)}</span>
+              <span>Ends {dateLabel(surface.endDate)}</span>
+            </div>
+            <h2>{surface.eventTitle}</h2>
+            <div className="event-footer-line">
+              {surface.marketUrl ? (
+                <a href={surface.marketUrl} target="_blank" rel="noreferrer" className="market-source-link">
+                  Open on Polymarket
+                  <ExternalLink size={13} />
+                </a>
+              ) : null}
+              <span className={selected ? "event-selected-summary active" : "event-selected-summary"}>
+                {selected ? `${selected.question} · ${selected.outcome} · ${formatCents(selected.price)}` : "No pick yet"}
+              </span>
+            </div>
+          </div>
+          <button
+            className="event-toggle"
+            onClick={() =>
+              setExpandedEvents((current) => {
+                const next = new Set(current);
+                if (next.has(surface.key)) next.delete(surface.key);
+                else next.add(surface.key);
+                return next;
+              })
+            }
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={siblingListId}
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${surface.eventTitle}`}
+          >
+            <ChevronDown size={20} />
+          </button>
+        </div>
+        <div className="event-sibling-list" id={siblingListId} hidden={!expanded}>
+          {expanded ? (
+            <>
+              <div className="event-sibling-rows" role="list">
+                {visibleSiblingRows.map((row) => renderMarketRow(row, "sibling"))}
+              </div>
+              {hasMoreSiblings ? (
+                <button
+                  className="event-show-more"
+                  onClick={() =>
+                    setExpandedSiblingLimits((current) => ({
+                      ...current,
+                      [surface.key]: Math.min(surface.rows.length, siblingLimit + initialLimit)
+                    }))
+                  }
+                  type="button"
+                >
+                  Show more
+                </button>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </article>
+    );
+  }
+
   return (
     <main className="app-shell">
       {renderPaymentModal()}
+      <div
+        className="app-background"
+        aria-hidden={mobileBasketOpen || paymentModalOpen ? true : undefined}
+        inert={mobileBasketOpen || paymentModalOpen ? true : undefined}
+      >
       <header className="topbar">
         <div>
           <div className="brand-lockup">
@@ -1775,11 +3160,11 @@ export default function App({ auth }: AppProps = {}) {
           ))}
         </nav>
         <div className="topbar-actions">
-          {activeView === "markets" ? <strong className="market-count">{filteredRows.length} shown</strong> : null}
+          {activeView === "markets" ? <strong className="market-count">{marketCountLabel}</strong> : null}
           {auth?.enabled ? (
             auth.authenticated ? (
               <button className="wallet-pill" onClick={auth.logout} type="button">
-                {auth.userLabel || "Wallet connected"}
+                Disconnect wallet
                 <span>{auth.walletSynced ? "Synced" : walletSyncFailed ? "Session issue" : walletSyncLimited ? "Account ready" : "Setting up"}</span>
               </button>
             ) : (
@@ -1792,26 +3177,26 @@ export default function App({ auth }: AppProps = {}) {
       </header>
 
       {activeView === "markets" ? (
-      <section className="quote-strip" aria-label="Quote summary">
+      <section className={hasBasketQuote ? "quote-strip" : "quote-strip empty"} aria-label="Quote summary">
         <div>
-          <span>Markets</span>
+          <span>Selected</span>
           <strong>{legs.length}</strong>
         </div>
         <div>
-          <span>Basket probability</span>
+          <span>Basket probability{quoteValueQualifier}</span>
           <strong>{basketProbabilityDisplay}</strong>
         </div>
         <div>
-          <span>Basket price</span>
+          <span>Basket price{quoteValueQualifier}</span>
           <strong>{basketPriceDisplay}</strong>
         </div>
         <div>
-          <span>Potential payout</span>
-          <strong>{payoutDisplay}</strong>
+          <span>Potential payout{quoteValueQualifier}</span>
+          <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
         </div>
         <div>
-          <span>Amount due</span>
-          <strong>{formatUsd(parlay.totalCost)}</strong>
+          <span>Amount due{quoteValueQualifier}</span>
+          <strong>{totalCostDisplay}</strong>
         </div>
       </section>
       ) : null}
@@ -1848,10 +3233,11 @@ export default function App({ auth }: AppProps = {}) {
               />
             </label>
             <div className="category-rail" role="group" aria-label="Category filters">
-              {categories.slice(0, 8).map((item) => (
+              {categories.map((item) => (
                 <button
                   type="button"
                   className={category === item ? "category-chip active" : "category-chip"}
+                  aria-pressed={category === item}
                   onClick={() => setCategory(item)}
                   key={item}
                 >
@@ -1874,53 +3260,15 @@ export default function App({ auth }: AppProps = {}) {
             </div>
           ) : null}
 
+          {selectionNotice ? (
+            <div className="selection-toast" role="status" aria-live="polite" aria-atomic="true">
+              {selectionNotice}
+            </div>
+          ) : null}
+
           <div className="market-list">
-            {filteredRows.map((row) => {
-              const selected = selectedByMarket.get(row.marketId);
-              return (
-                <article
-                  className={selected ? "market-card chosen" : "market-card"}
-                  key={row.marketId}
-                >
-                  <div className="market-image" aria-hidden="true">
-                    {row.icon || row.image ? <img src={row.icon || row.image} alt="" /> : <span>{marketInitial(row.question)}</span>}
-                  </div>
-                  <div className="market-main">
-                    <div className="market-meta">
-                      <span>{row.category}</span>
-                      <span>{dateLabel(row.endDate)}</span>
-                      <span>Vol {compactUsd(row.volume)}</span>
-                    </div>
-                    <h2>{row.question}</h2>
-                    {row.marketUrl ? (
-                      <a href={row.marketUrl} target="_blank" rel="noreferrer" className="market-source-link">
-                        {sourceLabel(row.source, row.marketUrl)}
-                        <ExternalLink size={13} />
-                      </a>
-                    ) : (
-                      <span className="market-source-note">{sourceLabel(row.source, row.marketUrl)}</span>
-                    )}
-                  </div>
-                  <div className="outcome-grid">
-                    {row.outcomes.map((outcome) => {
-                      const isSelected = selected?.id === outcome.id;
-                      return (
-                        <button
-                          className={`outcome-btn ${outcomeTone(outcome.outcome)}${isSelected ? " selected" : ""}`}
-                          onClick={() => chooseOutcome(outcome)}
-                          key={outcome.id}
-                          aria-pressed={isSelected}
-                        >
-                          <span>{outcome.outcome}</span>
-                          <strong>{formatCents(outcome.price)}</strong>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </article>
-              );
-            })}
-            {filteredRows.length === 0 ? (
+            {marketEventSurfaces.map((surface) => renderEventSurface(surface))}
+            {marketEventSurfaces.length === 0 ? (
               <div className="empty-market-state">
                 {fetchState === "loading" || fetchState === "idle" ? (
                   <div className="market-loading-orbit" aria-hidden="true" />
@@ -1930,20 +3278,50 @@ export default function App({ auth }: AppProps = {}) {
                     ? "Loading live Polymarket markets"
                     : hasMarketFilters
                       ? "No matches"
-                      : "No live markets loaded"}
+                      : "No live markets"}
                 </strong>
                 <span>
                   {fetchState === "loading" || fetchState === "idle"
                     ? "LEGWORK only shows markets with a verified Polymarket source link."
                     : hasMarketFilters
                       ? "Clear the search or category filter to see more markets."
-                      : marketError || "No unverified markets are shown. Try again once Polymarket data is available."}
+                      : marketError || "No markets are available right now."}
                 </span>
                 {fetchState === "error" ? (
                   <button className="primary-inline-btn" onClick={() => setMarketRefreshKey((key) => key + 1)} type="button">
                     Retry markets
                   </button>
                 ) : null}
+              </div>
+            ) : null}
+            {marketHasMore && marketEventSurfaces.length > 0 ? (
+              <button
+                className="load-more-markets"
+                disabled={loadingMoreMarkets || !nextMarketCursor}
+                onClick={() => {
+                  if (!nextMarketCursor) return;
+                  void loadMarketCatalogPage("append", nextMarketCursor);
+                }}
+                type="button"
+              >
+                {loadingMoreMarkets ? "Loading" : "Load more"}
+              </button>
+            ) : null}
+            {paginationIssue ? (
+              <div className="pagination-error" role="status" aria-live="polite" aria-atomic="true">
+                <span>{paginationIssue.message}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (paginationIssue.kind === "duplicate" || paginationIssue.kind === "malformed") {
+                      setMarketRefreshKey((key) => key + 1);
+                    } else {
+                      void loadMarketCatalogPage("append", paginationIssue.cursor);
+                    }
+                  }}
+                >
+                  {paginationIssue.kind === "duplicate" || paginationIssue.kind === "malformed" ? "Retry catalog" : "Retry load more"}
+                </button>
               </div>
             ) : null}
           </div>
@@ -2040,87 +3418,81 @@ export default function App({ auth }: AppProps = {}) {
 
           <div className="totals-grid">
             <div>
-              <span>Basket price</span>
+              <span>Basket price{quoteValueQualifier}</span>
               <strong>{basketPriceDisplay}</strong>
             </div>
             <div>
-              <span>Quote spread</span>
+              <span>Quote spread{quoteValueQualifier}</span>
               <strong>{quoteSpreadDisplay}</strong>
             </div>
             <div>
-              <span>Operation fee</span>
-              <strong>{formatUsd(parlay.operationFee)}</strong>
+              <span>Operation fee{quoteValueQualifier}</span>
+              <strong>{operationFeeDisplay}</strong>
             </div>
             <div>
-              <span>Payout multiple</span>
+              <span>Payout multiple{quoteValueQualifier}</span>
               <strong>{payoutMultipleDisplay}</strong>
             </div>
           </div>
 
-          <div className="payout-callout" aria-live="polite">
-            <span>Potential payout</span>
-            <strong className="payout-value" key={`payout-${burstKey}`}>
-              {payoutDisplay}
-              {burstKey > 0 ? (
-                <em className="firework-burst" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                </em>
-              ) : null}
-            </strong>
-            <small>
-              {legs.length < 2
-                ? legs.length === 1
-                  ? "Add one more market to unlock a basket quote."
-                  : "Add two markets to unlock a basket quote."
-                : risk.decision === "reject"
-                  ? "This basket is outside launch risk limits, so LEGWORK will not quote a worse payout."
-                  : "Paid if every selected market resolves your way."}
-            </small>
-          </div>
-
-          <button
-            className="checkout-btn"
-            disabled={!canUseCheckoutAction || checkoutBusy}
-            onClick={handleCheckout}
-          >
-            <Banknote size={18} />
-            {checkoutLabel}
-          </button>
-
-          {hasBasketQuote ? (
-            <div className={`risk-panel ${risk.decision}`}>
-            <div>
-              <span>Risk engine</span>
-              <strong>{risk.decision === "accept" ? "Acceptable" : risk.decision === "review" ? "Review quote" : "Blocked"}</strong>
-            </div>
-            <small>
-              Quote spread: {formatPercent(risk.spreadBps / 10_000)} · Spread cap: {formatPercent(risk.maxSpreadBps / 10_000)}
-            </small>
-            {serverQuoteState === "ready" && activeServerQuote ? (
-              <small className="server-quote-status">
-                Server quote {activeServerQuote.status} · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
+          <div className="checkout-dock">
+            <div className="payout-callout" aria-live="polite">
+              <span>Potential payout{quoteValueQualifier}</span>
+              <AnimatedPayout value={payoutDisplay} burstKey={burstKey} />
+              <small>
+                {legs.length < 2
+                  ? legs.length === 1
+                    ? "Add one more market to unlock a basket quote."
+                    : "Add two markets to unlock a basket quote."
+                  : !hasBuyAmount
+                    ? "Enter buy amount to see payout."
+                    : risk.decision === "reject"
+                      ? "This basket cannot be quoted within the current limits."
+                      : "Paid if every selected market resolves your way."}
               </small>
-            ) : null}
-            {serverQuoteState === "error" ? <small className="server-quote-status error">{serverQuoteError}</small> : null}
-            {serverTicketState === "ready" && serverTicket ? (
-              <small className="server-quote-status">Ticket live · {serverTicket.ticketId.slice(0, 8)}</small>
-            ) : null}
-            {serverTicketState === "error" ? <small className="server-quote-status error">{serverTicketError}</small> : null}
-            <div className="risk-check-list">
-              {visibleRiskChecks.map((check) => (
-                <span className={check.level} key={`${check.label}-${check.detail}`}>
-                  {check.label}: {check.detail}
-                </span>
-              ))}
             </div>
+
+            <button
+              className="checkout-btn"
+              disabled={!canUseCheckoutAction || checkoutBusy}
+              onClick={handleCheckout}
+            >
+              <Banknote size={18} />
+              {checkoutLabel}
+            </button>
           </div>
+
+          {hasBasketQuote && hasBuyAmount ? (
+            <details className={`risk-panel ${risk.decision}`} open={risk.decision === "reject" ? true : undefined}>
+              <summary>
+                <span>Basket availability</span>
+                <strong>
+                  {risk.decision === "accept" ? "Available" : risk.decision === "review" ? "Price check needed" : "Unavailable"}
+                </strong>
+              </summary>
+              <div className="risk-diagnostics">
+                <small>
+                  Quote spread: {formatPercent(risk.spreadBps / 10_000)} · Maximum spread: {formatPercent(risk.maxSpreadBps / 10_000)}
+                </small>
+                {serverQuoteState === "ready" && activeServerQuote ? (
+                  <small className="server-quote-status">
+                    Live quote confirmed · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
+                  </small>
+                ) : null}
+                {serverQuoteState === "error" ? <small className="server-quote-status error">{serverQuoteError}</small> : null}
+                {serverTicketState === "ready" && serverTicket ? (
+                  <small className="server-quote-status">Ticket live · {serverTicket.ticketId.slice(0, 8)}</small>
+                ) : null}
+                {serverTicketState === "error" ? <small className="server-quote-status error">{serverTicketError}</small> : null}
+                <div className="risk-check-list">
+                  {visibleRiskChecks.map((check) => (
+                    <span className={check.level} key={`${check.label}-${check.detail}`}>
+                      {check.label}: {check.detail}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </details>
           ) : null}
 
           <details className="detail-panel" open>
@@ -2132,7 +3504,7 @@ export default function App({ auth }: AppProps = {}) {
               <span>1. Choose one side from at least two markets.</span>
               <span>2. The basket price compounds each selected market price.</span>
               <span>3. You win only if every leg resolves in your direction.</span>
-              <span>4. For launch, LEGWORK allows one pick per event group. Related markets disappear after you choose a side.</span>
+              <span>4. For launch, LEGWORK allows one pick per event group. A new pick from the same event replaces the prior one.</span>
             </div>
           </details>
 
@@ -2147,10 +3519,10 @@ export default function App({ auth }: AppProps = {}) {
               basket quote.
             </p>
             <div className="settlement-steps">
-              <span>Operation fee: {formatUsd(1)} per selected market</span>
-              <span>Quote spread: {formatPercent(parlay.houseEdge)} on the basket quote</span>
+              <span>$0.50 per selected leg</span>
+              <span>Quote spread: {quoteSpreadDisplay} on the basket quote</span>
               <span>Risk adjustment: correlation, liquidity, payout, and leg-count checks</span>
-              <span>Amount due: {formatUsd(parlay.totalCost)}</span>
+              <span>Amount due: {totalCostDisplay}</span>
             </div>
           </details>
 
@@ -2195,19 +3567,28 @@ export default function App({ auth }: AppProps = {}) {
       ) : (
         renderPortfolio()
       )}
+      </div>
 
       {activeView === "markets" && mobileBasketOpen ? (
         <>
-          <button className="mobile-sheet-backdrop" onClick={() => setMobileBasketOpen(false)} aria-label="Collapse basket" />
-          <div className="mobile-basket-sheet" role="dialog" aria-label="Basket">
+          <div className="mobile-sheet-backdrop" onClick={closeMobileBasket} aria-hidden="true" />
+          <div
+            className="mobile-basket-sheet"
+            id="mobile-basket-dialog"
+            ref={mobileBasketDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mobile-basket-title"
+            tabIndex={-1}
+            aria-hidden={paymentModalOpen ? true : undefined}
+            inert={paymentModalOpen ? true : undefined}
+          >
             <div className="mobile-sheet-handle">
               <div>
-                <span>Basket</span>
-                <strong className="mobile-payout-value" key={`sheet-${burstKey}`}>
-                  {mobilePayoutDisplay}
-                </strong>
+                <span id="mobile-basket-title">Basket</span>
+                <AnimatedPayout value={mobilePayoutDisplay} burstKey={burstKey} className="mobile-payout-value" compact />
               </div>
-              <button onClick={() => setMobileBasketOpen(false)} aria-label="Collapse basket">
+              <button ref={mobileBasketCloseRef} onClick={closeMobileBasket} aria-label="Collapse basket">
                 <ChevronDown size={20} />
               </button>
             </div>
@@ -2281,11 +3662,11 @@ export default function App({ auth }: AppProps = {}) {
 
               <div className="mobile-sheet-totals">
                 <span>{basketPriceDisplay} basket price</span>
-                <strong>{formatUsd(parlay.totalCost)} due</strong>
+                <strong>{totalCostDisplay} due</strong>
               </div>
               {serverQuoteState === "ready" && activeServerQuote ? (
                 <small className="server-quote-status mobile-status">
-                  Server quote {activeServerQuote.status} · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
+                  Live quote confirmed · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
                 </small>
               ) : null}
               {serverQuoteState === "error" ? <small className="server-quote-status error mobile-status">{serverQuoteError}</small> : null}
@@ -2306,14 +3687,32 @@ export default function App({ auth }: AppProps = {}) {
       ) : null}
 
       {activeView === "markets" ? (
-      <button className="mobile-basket-bar" onClick={() => setMobileBasketOpen(true)} aria-expanded={mobileBasketOpen}>
+      <button
+        className="mobile-basket-bar"
+        ref={mobileBasketTriggerRef}
+        onClick={openMobileBasket}
+        aria-expanded={mobileBasketOpen}
+        aria-controls="mobile-basket-dialog"
+        aria-hidden={mobileBasketOpen || paymentModalOpen ? true : undefined}
+        inert={mobileBasketOpen || paymentModalOpen ? true : undefined}
+      >
         <div>
-          <span>{legs.length} markets</span>
-          <strong className="mobile-payout-value" key={`bar-${burstKey}`}>
-            {mobilePayoutDisplay}
-          </strong>
+          <span>{legs.length} selected</span>
+          <AnimatedPayout value={mobilePayoutDisplay} burstKey={burstKey} className="mobile-payout-value" compact />
         </div>
-        <span className={canDraft ? "mobile-review ready" : "mobile-review"}>{risk.decision === "reject" ? "Blocked" : "Review"}</span>
+        <span className={canUseCheckoutAction ? "mobile-review ready" : "mobile-review"}>
+          {legs.length === 0
+            ? "Add 2 picks"
+            : legs.length === 1
+              ? "Add 1 pick"
+              : !hasBuyAmount
+                ? "Add amount"
+                : risk.decision === "reject"
+                  ? "Unavailable"
+                  : auth?.enabled && !auth.authenticated
+                    ? "Connect"
+                    : "Review"}
+        </span>
       </button>
       ) : null}
     </main>
@@ -2322,6 +3721,37 @@ export default function App({ auth }: AppProps = {}) {
 
 function WalletCardIcon() {
   return <Banknote size={28} />;
+}
+
+function AnimatedPayout({
+  value,
+  burstKey,
+  className = "",
+  compact = false
+}: {
+  value: string;
+  burstKey: number;
+  className?: string;
+  compact?: boolean;
+}) {
+  const classes = ["payout-value", compact ? "compact" : "", className].filter(Boolean).join(" ");
+  return (
+    <strong className={classes} key={`payout-${burstKey}`}>
+      {value}
+      {burstKey > 0 ? (
+        <em className="firework-burst" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </em>
+      ) : null}
+    </strong>
+  );
 }
 
 function AccountSkeleton({ rows }: { rows: number }) {

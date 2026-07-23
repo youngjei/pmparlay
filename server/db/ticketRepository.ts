@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { assertFinancialGateOpenInTransaction } from "../financialGate";
 import { getPool } from "./client";
+import {
+  prepareTicketSettlementIdentities,
+  validateAndFreezeTicketSettlementIdentitiesInTransaction,
+  type FrozenSettlementIdentity,
+  type SettlementIdentityValidation
+} from "./settlementRepository";
 
 export type AcceptedTicket = {
   ticketId: string;
@@ -22,6 +29,7 @@ export type TicketDetail = {
   operationFeeUsd: number;
   amountPaidUsd: number;
   potentialPayoutUsd: number;
+  claimableAmountUsd: number;
   accountingMode: string;
   currency: string;
   purchaseTxHash?: string;
@@ -41,10 +49,55 @@ export type TicketDetail = {
   }>;
 };
 
-type AcceptQuoteOptions = {
+type ClaimableTicketCursor = {
+  createdAt: string;
+  ticketId: string;
+};
+
+export type ListClaimableTicketsInput = {
+  cursor?: string;
+  limit: number;
+};
+
+export type ClaimableTicketsPage = {
+  tickets: Array<{
+    ticketId: string;
+    quoteId: string;
+    status: "claimable";
+    createdAt: string;
+    updatedAt: string;
+    stakeUsd: number;
+    operationFeeUsd: number;
+    amountPaidUsd: number;
+    potentialPayoutUsd: number;
+    claimableAmountUsd: number;
+    accountingMode: string;
+    currency: string;
+    legs: number;
+    legStatusCounts: {
+      pending: number;
+      won: number;
+      lost: number;
+      voided: number;
+      disputed: number;
+    };
+  }>;
+  pageInfo: {
+    limit: number;
+    hasMore: boolean;
+    nextCursor?: string;
+  };
+};
+
+export type AcceptQuoteOptions = {
   accountingMode?: AccountingMode;
   currency?: LedgerCurrency;
   allowExpiredQuote?: boolean;
+  includeSoftReservations?: boolean;
+  excludePaymentIntentId?: string;
+  requireSettlementIdentity?: boolean;
+  validateSettlementIdentity?: (identity: FrozenSettlementIdentity) => Promise<SettlementIdentityValidation>;
+  assertFinancialGateOpenInTransaction?: typeof assertFinancialGateOpenInTransaction;
   maxUserLiabilityUsd?: number;
   maxMarketLiabilityUsd: number;
   maxEventLiabilityUsd: number;
@@ -53,8 +106,86 @@ type AcceptQuoteOptions = {
 type AccountingMode = "play_money" | "house_book_usdc";
 type LedgerCurrency = "USD" | "USDC";
 
-function microUsdToUsd(value: string | number | null) {
-  return Number(value || 0) / 1_000_000;
+class QuoteExpiredAfterStatusUpdate extends Error {
+  constructor() {
+    super("quote_expired");
+  }
+}
+
+function microUsdToUsd(value: string | number | bigint | null) {
+  return Number(BigInt(value || 0)) / 1_000_000;
+}
+
+function claimableAmountUsd(stakeMicroUsd: string, offeredPayoutMicroUsd: string, hasVoidedLeg: boolean) {
+  const claimableMicroUsd = hasVoidedLeg ? BigInt(stakeMicroUsd) : BigInt(offeredPayoutMicroUsd);
+  return microUsdToUsd(claimableMicroUsd);
+}
+
+const cursorTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{6})Z$/;
+
+function isCanonicalCursorTimestamp(value: string) {
+  const match = cursorTimestampPattern.exec(value);
+  if (!match) return false;
+
+  const [, year, month, day, hour, minute, second, microseconds] = match;
+  const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}.${microseconds.slice(0, 3)}Z`);
+  return (
+    !Number.isNaN(date.getTime()) &&
+    date.getUTCFullYear() === Number(year) &&
+    date.getUTCMonth() + 1 === Number(month) &&
+    date.getUTCDate() === Number(day) &&
+    date.getUTCHours() === Number(hour) &&
+    date.getUTCMinutes() === Number(minute) &&
+    date.getUTCSeconds() === Number(second)
+  );
+}
+
+const ticketIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function parseClaimableTicketsCursor(cursor: string): ClaimableTicketCursor {
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(cursor)) {
+    throw new Error("invalid_claimable_ticket_cursor");
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).length !== 2 ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.ticketId !== "string" ||
+      !isCanonicalCursorTimestamp(parsed.createdAt) ||
+      !ticketIdPattern.test(parsed.ticketId)
+    ) {
+      throw new Error("invalid_claimable_ticket_cursor");
+    }
+
+    const canonical = encodeClaimableTicketsCursor({
+      createdAt: parsed.createdAt,
+      ticketId: parsed.ticketId
+    });
+    if (canonical !== cursor) {
+      throw new Error("invalid_claimable_ticket_cursor");
+    }
+
+    return {
+      createdAt: parsed.createdAt,
+      ticketId: parsed.ticketId
+    };
+  } catch {
+    throw new Error("invalid_claimable_ticket_cursor");
+  }
+}
+
+function encodeClaimableTicketsCursor(cursor: ClaimableTicketCursor) {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function usdLimitToMicroUnits(value: number, label: string) {
+  const scaled = Math.round(value * 1_000_000);
+  if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(scaled)) {
+    throw new Error(`invalid_exposure_limit:${label}`);
+  }
+  return BigInt(scaled);
 }
 
 async function ensureLedgerAccount(client: pg.PoolClient, userId: string | null, accountType: string, currency: string) {
@@ -124,7 +255,7 @@ async function ledgerBalanceMicroUnits(client: pg.PoolClient, accountId: string)
     [accountId]
   );
 
-  return Number(result.rows[0]?.balance || 0);
+  return BigInt(result.rows[0]?.balance || 0);
 }
 
 function accountTypes(accountingMode: AccountingMode) {
@@ -150,8 +281,8 @@ async function enforceFundingCapacity(
     userAccountId: string;
     houseOperatingAccountId: string;
     houseReserveAccountId: string;
-    amountDueMicroUnits: number;
-    netLiabilityMicroUnits: number;
+    amountDueMicroUnits: bigint;
+    netLiabilityMicroUnits: bigint;
   }
 ) {
   if (input.accountingMode !== "house_book_usdc") return;
@@ -176,7 +307,7 @@ async function enforceAcceptExposureLimits(
   client: pg.PoolClient,
   userId: string,
   quoteId: string,
-  incrementalLiabilityUsd: number,
+  incrementalLiabilityMicroUsd: bigint,
   options?: AcceptQuoteOptions
 ) {
   if (!options) return;
@@ -208,30 +339,62 @@ async function enforceAcceptExposureLimits(
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
   }
 
+  const includeSoftReservations = options.includeSoftReservations === true;
+  const excludedPaymentIntentId = options.excludePaymentIntentId || null;
   const marketExposure = await client.query<{
     source_market_id: string;
     outcome: string;
     worst_case_liability_micro_usd: string;
   }>(
     `
-      SELECT source_market_id, outcome, worst_case_liability_micro_usd::text
-      FROM open_market_exposure
-      WHERE (source_market_id, outcome) IN (
+      WITH quote_targets AS (
         SELECT markets.source_market_id, quote_legs.outcome
         FROM quote_legs
         JOIN markets ON markets.id = quote_legs.market_id
         WHERE quote_legs.quote_id = $1
+      ),
+      hard AS (
+        SELECT open_market_exposure.source_market_id, open_market_exposure.outcome, open_market_exposure.worst_case_liability_micro_usd::BIGINT AS exposure
+        FROM open_market_exposure
+        JOIN quote_targets
+          ON quote_targets.source_market_id = open_market_exposure.source_market_id
+          AND quote_targets.outcome = open_market_exposure.outcome
+      ),
+      soft AS (
+        SELECT
+          markets.source_market_id,
+          quote_legs.outcome,
+          sum(quote_payment_exposure_reservations.liability_micro_usd)::BIGINT AS exposure
+        FROM quote_payment_exposure_reservations
+        JOIN quote_legs ON quote_legs.quote_id = quote_payment_exposure_reservations.quote_id
+        JOIN markets ON markets.id = quote_legs.market_id
+        JOIN quote_targets
+          ON quote_targets.source_market_id = markets.source_market_id
+          AND quote_targets.outcome = quote_legs.outcome
+        WHERE $2::boolean
+          AND quote_payment_exposure_reservations.status = 'reserved'
+          AND quote_payment_exposure_reservations.expires_at > now()
+          AND ($3::uuid IS NULL OR quote_payment_exposure_reservations.payment_intent_id <> $3)
+        GROUP BY markets.source_market_id, quote_legs.outcome
       )
+      SELECT source_market_id, outcome, sum(exposure)::text AS worst_case_liability_micro_usd
+      FROM (
+        SELECT * FROM hard
+        UNION ALL
+        SELECT * FROM soft
+      ) exposure
+      GROUP BY source_market_id, outcome
     `,
-    [quoteId]
+    [quoteId, includeSoftReservations, excludedPaymentIntentId]
   );
   const marketExposureByKey = new Map(
-    marketExposure.rows.map((row) => [`${row.source_market_id}:${row.outcome}`, microUsdToUsd(row.worst_case_liability_micro_usd)])
+    marketExposure.rows.map((row) => [`${row.source_market_id}:${row.outcome}`, BigInt(row.worst_case_liability_micro_usd)])
   );
+  const maxMarketLiabilityMicroUsd = usdLimitToMicroUnits(options.maxMarketLiabilityUsd, "market");
 
   for (const leg of legs.rows) {
-    const currentExposureUsd = marketExposureByKey.get(`${leg.source_market_id}:${leg.outcome}`) || 0;
-    if (currentExposureUsd + incrementalLiabilityUsd > options.maxMarketLiabilityUsd) {
+    const currentExposureMicroUsd = marketExposureByKey.get(`${leg.source_market_id}:${leg.outcome}`) || 0n;
+    if (currentExposureMicroUsd + incrementalLiabilityMicroUsd > maxMarketLiabilityMicroUsd) {
       throw new Error("quote_exposure_limit:market");
     }
   }
@@ -241,40 +404,278 @@ async function enforceAcceptExposureLimits(
     worst_case_liability_micro_usd: string;
   }>(
     `
-      SELECT market_url, worst_case_liability_micro_usd::text
-      FROM open_event_exposure
-      WHERE market_url IN (
+      WITH quote_targets AS (
         SELECT markets.market_url
         FROM quote_legs
         JOIN markets ON markets.id = quote_legs.market_id
         WHERE quote_legs.quote_id = $1
+      ),
+      hard AS (
+        SELECT open_event_exposure.market_url, open_event_exposure.worst_case_liability_micro_usd::BIGINT AS exposure
+        FROM open_event_exposure
+        JOIN quote_targets ON quote_targets.market_url = open_event_exposure.market_url
+      ),
+      soft AS (
+        SELECT
+          markets.market_url,
+          sum(quote_payment_exposure_reservations.liability_micro_usd)::BIGINT AS exposure
+        FROM quote_payment_exposure_reservations
+        JOIN quote_legs ON quote_legs.quote_id = quote_payment_exposure_reservations.quote_id
+        JOIN markets ON markets.id = quote_legs.market_id
+        JOIN quote_targets ON quote_targets.market_url = markets.market_url
+        WHERE $2::boolean
+          AND quote_payment_exposure_reservations.status = 'reserved'
+          AND quote_payment_exposure_reservations.expires_at > now()
+          AND ($3::uuid IS NULL OR quote_payment_exposure_reservations.payment_intent_id <> $3)
+        GROUP BY markets.market_url
       )
+      SELECT market_url, sum(exposure)::text AS worst_case_liability_micro_usd
+      FROM (
+        SELECT * FROM hard
+        UNION ALL
+        SELECT * FROM soft
+      ) exposure
+      GROUP BY market_url
     `,
-    [quoteId]
+    [quoteId, includeSoftReservations, excludedPaymentIntentId]
   );
-  const eventExposureByUrl = new Map(eventExposure.rows.map((row) => [row.market_url, microUsdToUsd(row.worst_case_liability_micro_usd)]));
+  const eventExposureByUrl = new Map(eventExposure.rows.map((row) => [row.market_url, BigInt(row.worst_case_liability_micro_usd)]));
+  const maxEventLiabilityMicroUsd = usdLimitToMicroUnits(options.maxEventLiabilityUsd, "event");
 
   for (const marketUrl of new Set(legs.rows.map((leg) => leg.market_url))) {
-    const currentExposureUsd = eventExposureByUrl.get(marketUrl) || 0;
-    if (currentExposureUsd + incrementalLiabilityUsd > options.maxEventLiabilityUsd) {
+    const currentExposureMicroUsd = eventExposureByUrl.get(marketUrl) || 0n;
+    if (currentExposureMicroUsd + incrementalLiabilityMicroUsd > maxEventLiabilityMicroUsd) {
       throw new Error("quote_exposure_limit:event");
     }
   }
 
-  if (options.maxUserLiabilityUsd) {
+  if (options.maxUserLiabilityUsd !== undefined) {
     const userExposure = await client.query<{ worst_case_liability_micro_usd: string }>(
       `
-        SELECT worst_case_liability_micro_usd::text
-        FROM open_user_exposure
-        WHERE user_id = $1
+        WITH hard AS (
+          SELECT COALESCE(worst_case_liability_micro_usd, 0)::BIGINT AS exposure
+          FROM open_user_exposure
+          WHERE user_id = $1
+        ),
+        soft AS (
+          SELECT COALESCE(sum(liability_micro_usd), 0)::BIGINT AS exposure
+          FROM quote_payment_exposure_reservations
+          WHERE $2::boolean
+            AND user_id = $1
+            AND status = 'reserved'
+            AND expires_at > now()
+            AND ($3::uuid IS NULL OR payment_intent_id <> $3)
+        )
+        SELECT (COALESCE((SELECT exposure FROM hard), 0) + COALESCE((SELECT exposure FROM soft), 0))::text
+          AS worst_case_liability_micro_usd
       `,
-      [userId]
+      [userId, includeSoftReservations, excludedPaymentIntentId]
     );
-    const currentExposureUsd = microUsdToUsd(userExposure.rows[0]?.worst_case_liability_micro_usd || 0);
-    if (currentExposureUsd + incrementalLiabilityUsd > options.maxUserLiabilityUsd) {
+    const currentExposureMicroUsd = BigInt(userExposure.rows[0]?.worst_case_liability_micro_usd || 0);
+    const maxUserLiabilityMicroUsd = usdLimitToMicroUnits(options.maxUserLiabilityUsd, "user");
+    if (currentExposureMicroUsd + incrementalLiabilityMicroUsd > maxUserLiabilityMicroUsd) {
       throw new Error("quote_exposure_limit:user");
     }
   }
+}
+
+export async function acceptQuoteInTransaction(client: pg.PoolClient, quoteId: string, userId: string, options?: AcceptQuoteOptions): Promise<AcceptedTicket> {
+  const accountingMode = options?.accountingMode || "play_money";
+  const currency: LedgerCurrency = options?.currency || (accountingMode === "house_book_usdc" ? "USDC" : "USD");
+  if (accountingMode === "house_book_usdc" && currency !== "USDC") {
+    throw new Error("invalid_house_book_currency");
+  }
+  if (accountingMode === "house_book_usdc") {
+    await (options?.assertFinancialGateOpenInTransaction || assertFinancialGateOpenInTransaction)(client, {
+      operation: "ticket_accept"
+    });
+  }
+
+  const quoteResult = await client.query<{
+    id: string;
+    status: "quoted" | "accepted" | "expired" | "rejected";
+    user_id: string | null;
+    stake_micro_usd: string;
+    operation_fee_micro_usd: string;
+    offered_payout_micro_usd: string;
+    risk_decision: "accept" | "review" | "reject";
+    expires_at: Date;
+  }>(
+    `
+      SELECT
+        id,
+        status,
+        user_id,
+        stake_micro_usd::text,
+        operation_fee_micro_usd::text,
+        offered_payout_micro_usd::text,
+        risk_decision,
+        expires_at
+      FROM quotes
+      WHERE id = $1
+      FOR UPDATE
+    `,
+    [quoteId]
+  );
+
+  const quote = quoteResult.rows[0];
+  if (!quote) {
+    throw new Error("quote_not_found");
+  }
+
+  if (quote.user_id && quote.user_id !== userId) {
+    throw new Error("quote_not_found");
+  }
+
+  if (quote.status === "accepted") {
+    const ticket = await existingTicket(client, quoteId, userId);
+    if (ticket) return ticket;
+  }
+
+  if (quote.status !== "quoted" && !(options?.allowExpiredQuote && quote.status === "expired")) {
+    throw new Error(`quote_not_acceptable:${quote.status}`);
+  }
+
+  if (!options?.allowExpiredQuote && quote.expires_at.getTime() <= Date.now()) {
+    await client.query("UPDATE quotes SET status = 'expired' WHERE id = $1", [quoteId]);
+    throw new QuoteExpiredAfterStatusUpdate();
+  }
+
+  if (accountingMode === "house_book_usdc" && quote.risk_decision !== "accept") {
+    throw new Error(`quote_requires_review:${quote.risk_decision}`);
+  }
+
+  const accounts = accountTypes(accountingMode);
+  const userAccountId = await ensureLedgerAccount(client, userId, accounts.userAvailable, currency);
+  const houseAccountId = await ensureLedgerAccount(client, null, accounts.houseOperating, currency);
+  const houseReserveAccountId = await ensureLedgerAccount(client, null, accounts.houseReserve, currency);
+  const ticketId = randomUUID();
+  const transactionId = randomUUID();
+  const reserveTransactionId = randomUUID();
+  const stakeMicroUsd = BigInt(quote.stake_micro_usd);
+  const operationFeeMicroUsd = BigInt(quote.operation_fee_micro_usd);
+  const offeredPayoutMicroUsd = BigInt(quote.offered_payout_micro_usd);
+  const amountDue = stakeMicroUsd + operationFeeMicroUsd;
+  const netLiability = offeredPayoutMicroUsd > stakeMicroUsd ? offeredPayoutMicroUsd - stakeMicroUsd : 0n;
+
+  await enforceFundingCapacity(client, {
+    accountingMode,
+    userAccountId,
+    houseOperatingAccountId: houseAccountId,
+    houseReserveAccountId,
+    amountDueMicroUnits: amountDue,
+    netLiabilityMicroUnits: netLiability
+  });
+  await enforceAcceptExposureLimits(client, userId, quoteId, netLiability, options);
+
+  await client.query("UPDATE quotes SET status = 'accepted', accepted_at = now(), user_id = $2 WHERE id = $1", [quoteId, userId]);
+  await client.query(
+    `
+      INSERT INTO tickets (id, user_id, quote_id, status, accounting_mode, funding_currency)
+      VALUES ($1, $2, $3, 'accepted', $4, $5)
+    `,
+    [ticketId, userId, quoteId, accountingMode, currency]
+  );
+  await client.query(
+    `
+      INSERT INTO ticket_legs (ticket_id, quote_leg_id, status)
+      SELECT $1, quote_legs.id, 'pending'
+      FROM quote_legs
+      WHERE quote_legs.quote_id = $2
+    `,
+    [ticketId, quoteId]
+  );
+
+  let identities: FrozenSettlementIdentity[] = [];
+  if (options?.requireSettlementIdentity) {
+    const candidates = await prepareTicketSettlementIdentities(client, { ticketId });
+    identities = await validateAndFreezeTicketSettlementIdentitiesInTransaction(client, {
+      ticketId,
+      candidateIdentities: candidates,
+      validateCandidateIdentity: options.validateSettlementIdentity
+    });
+  }
+
+  await client.query(
+    `
+      INSERT INTO ledger_entries (transaction_id, account_id, amount_micro_units, currency, memo)
+      VALUES
+        ($1, $2, $3, $6, 'quote accepted'),
+        ($1, $4, $5, $6, 'quote accepted')
+    `,
+    [transactionId, userAccountId, (-amountDue).toString(), houseAccountId, amountDue.toString(), currency]
+  );
+  if (netLiability > 0n) {
+    await client.query(
+      `
+        INSERT INTO ledger_entries (transaction_id, account_id, amount_micro_units, currency, memo)
+        VALUES
+          ($1, $2, $3, $5, 'ticket liability reserved'),
+          ($1, $4, $6, $5, 'ticket liability reserved')
+      `,
+      [reserveTransactionId, houseAccountId, (-netLiability).toString(), houseReserveAccountId, currency, netLiability.toString()]
+    );
+  }
+  await client.query(
+    `
+      INSERT INTO ticket_reserves (
+        ticket_id,
+        user_id,
+        accounting_mode,
+        currency,
+        stake_micro_units,
+        operation_fee_micro_units,
+        offered_payout_micro_units,
+        net_liability_micro_units,
+        status,
+        purchase_transaction_id,
+        reserve_transaction_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
+    `,
+    [
+      ticketId,
+      userId,
+      accountingMode,
+      currency,
+      stakeMicroUsd.toString(),
+      operationFeeMicroUsd.toString(),
+      offeredPayoutMicroUsd.toString(),
+      netLiability.toString(),
+      transactionId,
+      netLiability > 0n ? reserveTransactionId : null
+    ]
+  );
+  await client.query(
+    `
+      INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, metadata)
+      VALUES ($1, 'quote.accepted', 'ticket', $2, $3)
+    `,
+    [
+      userId,
+      ticketId,
+      {
+        quoteId,
+        ledgerTransactionId: transactionId,
+        reserveTransactionId: netLiability > 0n ? reserveTransactionId : null,
+        accountingMode,
+        currency,
+        amountDueMicroUnits: amountDue.toString(),
+        netLiabilityMicroUnits: netLiability.toString(),
+        settlementIdentityLegs: identities.length
+      }
+    ]
+  );
+
+  return {
+    ticketId,
+    quoteId,
+    status: "accepted",
+    ledgerTransactionId: transactionId,
+    reserveTransactionId: netLiability > 0n ? reserveTransactionId : undefined,
+    accountingMode,
+    currency
+  };
 }
 
 export async function acceptQuote(quoteId: string, userId: string, options?: AcceptQuoteOptions): Promise<AcceptedTicket> {
@@ -283,192 +684,16 @@ export async function acceptQuote(quoteId: string, userId: string, options?: Acc
 
   try {
     await client.query("BEGIN");
-
-    const quoteResult = await client.query<{
-      id: string;
-      status: "quoted" | "accepted" | "expired" | "rejected";
-      user_id: string | null;
-      stake_micro_usd: string;
-      operation_fee_micro_usd: string;
-      offered_payout_micro_usd: string;
-      risk_decision: "accept" | "review" | "reject";
-      expires_at: Date;
-    }>(
-      `
-        SELECT
-          id,
-          status,
-          user_id,
-          stake_micro_usd::text,
-          operation_fee_micro_usd::text,
-          offered_payout_micro_usd::text,
-          risk_decision,
-          expires_at
-        FROM quotes
-        WHERE id = $1
-        FOR UPDATE
-      `,
-      [quoteId]
-    );
-
-    const quote = quoteResult.rows[0];
-    if (!quote) {
-      throw new Error("quote_not_found");
-    }
-
-    if (quote.user_id && quote.user_id !== userId) {
-      throw new Error("quote_not_found");
-    }
-
-    if (quote.status === "accepted") {
-      const ticket = await existingTicket(client, quoteId, userId);
-      if (ticket) {
-        await client.query("COMMIT");
-        committed = true;
-        return ticket;
-      }
-    }
-
-    if (quote.status !== "quoted" && !(options?.allowExpiredQuote && quote.status === "expired")) {
-      throw new Error(`quote_not_acceptable:${quote.status}`);
-    }
-
-    if (!options?.allowExpiredQuote && quote.expires_at.getTime() <= Date.now()) {
-      await client.query("UPDATE quotes SET status = 'expired' WHERE id = $1", [quoteId]);
+    const ticket = await acceptQuoteInTransaction(client, quoteId, userId, options);
+    await client.query("COMMIT");
+    committed = true;
+    return ticket;
+  } catch (error) {
+    if (error instanceof QuoteExpiredAfterStatusUpdate) {
       await client.query("COMMIT");
       committed = true;
       throw new Error("quote_expired");
     }
-
-    const accountingMode = options?.accountingMode || "play_money";
-    const currency: LedgerCurrency = options?.currency || (accountingMode === "house_book_usdc" ? "USDC" : "USD");
-    if (accountingMode === "house_book_usdc" && currency !== "USDC") {
-      throw new Error("invalid_house_book_currency");
-    }
-    if (accountingMode === "house_book_usdc" && quote.risk_decision !== "accept") {
-      throw new Error(`quote_requires_review:${quote.risk_decision}`);
-    }
-    const accounts = accountTypes(accountingMode);
-    const userAccountId = await ensureLedgerAccount(client, userId, accounts.userAvailable, currency);
-    const houseAccountId = await ensureLedgerAccount(client, null, accounts.houseOperating, currency);
-    const houseReserveAccountId = await ensureLedgerAccount(client, null, accounts.houseReserve, currency);
-    const ticketId = randomUUID();
-    const transactionId = randomUUID();
-    const reserveTransactionId = randomUUID();
-    const amountDue = Number(quote.stake_micro_usd) + Number(quote.operation_fee_micro_usd);
-    const netLiability = Math.max(0, Number(quote.offered_payout_micro_usd) - Number(quote.stake_micro_usd));
-    const incrementalLiabilityUsd = microUsdToUsd(netLiability);
-
-    await enforceFundingCapacity(client, {
-      accountingMode,
-      userAccountId,
-      houseOperatingAccountId: houseAccountId,
-      houseReserveAccountId,
-      amountDueMicroUnits: amountDue,
-      netLiabilityMicroUnits: netLiability
-    });
-    await enforceAcceptExposureLimits(client, userId, quoteId, incrementalLiabilityUsd, options);
-
-    await client.query("UPDATE quotes SET status = 'accepted', accepted_at = now(), user_id = $2 WHERE id = $1", [quoteId, userId]);
-    await client.query(
-      `
-        INSERT INTO tickets (id, user_id, quote_id, status, accounting_mode, funding_currency)
-        VALUES ($1, $2, $3, 'accepted', $4, $5)
-      `,
-      [ticketId, userId, quoteId, accountingMode, currency]
-    );
-    await client.query(
-      `
-        INSERT INTO ticket_legs (ticket_id, quote_leg_id, status)
-        SELECT $1, quote_legs.id, 'pending'
-        FROM quote_legs
-        WHERE quote_legs.quote_id = $2
-      `,
-      [ticketId, quoteId]
-    );
-    await client.query(
-      `
-        INSERT INTO ledger_entries (transaction_id, account_id, amount_micro_units, currency, memo)
-        VALUES
-          ($1, $2, $3, $6, 'quote accepted'),
-          ($1, $4, $5, $6, 'quote accepted')
-      `,
-      [transactionId, userAccountId, -amountDue, houseAccountId, amountDue, currency]
-    );
-    if (netLiability > 0) {
-      await client.query(
-        `
-          INSERT INTO ledger_entries (transaction_id, account_id, amount_micro_units, currency, memo)
-          VALUES
-            ($1, $2, $3, $5, 'ticket liability reserved'),
-            ($1, $4, $6, $5, 'ticket liability reserved')
-        `,
-        [reserveTransactionId, houseAccountId, -netLiability, houseReserveAccountId, currency, netLiability]
-      );
-    }
-    await client.query(
-      `
-        INSERT INTO ticket_reserves (
-          ticket_id,
-          user_id,
-          accounting_mode,
-          currency,
-          stake_micro_units,
-          operation_fee_micro_units,
-          offered_payout_micro_units,
-          net_liability_micro_units,
-          status,
-          purchase_transaction_id,
-          reserve_transaction_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10)
-      `,
-      [
-        ticketId,
-        userId,
-        accountingMode,
-        currency,
-        Number(quote.stake_micro_usd),
-        Number(quote.operation_fee_micro_usd),
-        Number(quote.offered_payout_micro_usd),
-        netLiability,
-        transactionId,
-        netLiability > 0 ? reserveTransactionId : null
-      ]
-    );
-    await client.query(
-      `
-        INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, metadata)
-        VALUES ($1, 'quote.accepted', 'ticket', $2, $3)
-      `,
-      [
-        userId,
-        ticketId,
-        {
-          quoteId,
-          ledgerTransactionId: transactionId,
-          reserveTransactionId: netLiability > 0 ? reserveTransactionId : null,
-          accountingMode,
-          currency,
-          amountDueMicroUnits: amountDue,
-          netLiabilityMicroUnits: netLiability
-        }
-      ]
-    );
-
-    await client.query("COMMIT");
-    committed = true;
-
-    return {
-      ticketId,
-      quoteId,
-      status: "accepted",
-      ledgerTransactionId: transactionId,
-      reserveTransactionId: netLiability > 0 ? reserveTransactionId : undefined,
-      accountingMode,
-      currency
-    };
-  } catch (error) {
     if (!committed) {
       await client.query("ROLLBACK");
     }
@@ -496,6 +721,7 @@ export async function listTickets(userId: string) {
     lostLegs: string;
     voidedLegs: string;
     disputedLegs: string;
+    hasVoidedLeg: boolean;
   }>(
     `
       SELECT
@@ -514,7 +740,8 @@ export async function listTickets(userId: string) {
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'won')::text AS "wonLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'lost')::text AS "lostLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'voided')::text AS "voidedLegs",
-        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'disputed')::text AS "disputedLegs"
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'disputed')::text AS "disputedLegs",
+        COALESCE(bool_or(ticket_legs.status = 'voided'), false) AS "hasVoidedLeg"
       FROM tickets
       JOIN quotes ON quotes.id = tickets.quote_id
       LEFT JOIN ticket_legs ON ticket_legs.ticket_id = tickets.id
@@ -534,8 +761,9 @@ export async function listTickets(userId: string) {
     updatedAt: row.updatedAt.toISOString(),
     stakeUsd: microUsdToUsd(row.stakeMicroUsd),
     operationFeeUsd: microUsdToUsd(row.operationFeeMicroUsd),
-    amountPaidUsd: microUsdToUsd(Number(row.stakeMicroUsd) + Number(row.operationFeeMicroUsd)),
+    amountPaidUsd: microUsdToUsd(BigInt(row.stakeMicroUsd) + BigInt(row.operationFeeMicroUsd)),
     potentialPayoutUsd: microUsdToUsd(row.potentialPayoutMicroUsd),
+    claimableAmountUsd: claimableAmountUsd(row.stakeMicroUsd, row.potentialPayoutMicroUsd, row.hasVoidedLeg),
     accountingMode: row.accountingMode,
     currency: row.currency,
     legs: Number(row.legs),
@@ -547,6 +775,104 @@ export async function listTickets(userId: string) {
       disputed: Number(row.disputedLegs)
     }
   }));
+}
+
+export async function listClaimableTickets(userId: string, input: ListClaimableTicketsInput): Promise<ClaimableTicketsPage> {
+  if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    throw new Error("invalid_claimable_ticket_limit");
+  }
+
+  const cursor = input.cursor ? parseClaimableTicketsCursor(input.cursor) : undefined;
+  const result = await getPool().query<{
+    ticketId: string;
+    quoteId: string;
+    status: "claimable";
+    createdAt: Date;
+    cursorCreatedAt: string;
+    updatedAt: Date;
+    stakeMicroUsd: string;
+    operationFeeMicroUsd: string;
+    potentialPayoutMicroUsd: string;
+    accountingMode: string;
+    currency: string;
+    legs: string;
+    pendingLegs: string;
+    wonLegs: string;
+    lostLegs: string;
+    voidedLegs: string;
+    disputedLegs: string;
+    hasVoidedLeg: boolean;
+  }>(
+    `
+      SELECT
+        tickets.id AS "ticketId",
+        tickets.quote_id AS "quoteId",
+        tickets.status,
+        tickets.created_at AS "createdAt",
+        to_char(tickets.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorCreatedAt",
+        tickets.updated_at AS "updatedAt",
+        quotes.stake_micro_usd::text AS "stakeMicroUsd",
+        quotes.operation_fee_micro_usd::text AS "operationFeeMicroUsd",
+        quotes.offered_payout_micro_usd::text AS "potentialPayoutMicroUsd",
+        tickets.accounting_mode AS "accountingMode",
+        tickets.funding_currency AS "currency",
+        count(ticket_legs.id)::text AS legs,
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'pending')::text AS "pendingLegs",
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'won')::text AS "wonLegs",
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'lost')::text AS "lostLegs",
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'voided')::text AS "voidedLegs",
+        count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'disputed')::text AS "disputedLegs",
+        COALESCE(bool_or(ticket_legs.status = 'voided'), false) AS "hasVoidedLeg"
+      FROM tickets
+      JOIN quotes ON quotes.id = tickets.quote_id
+      LEFT JOIN ticket_legs ON ticket_legs.ticket_id = tickets.id
+      WHERE tickets.user_id = $1
+        AND tickets.status = 'claimable'
+        AND (
+          $2::timestamptz IS NULL
+          OR tickets.created_at < $2::timestamptz
+          OR (tickets.created_at = $2::timestamptz AND tickets.id < $3::uuid)
+        )
+      GROUP BY tickets.id, quotes.id
+      ORDER BY tickets.created_at DESC, tickets.id DESC
+      LIMIT $4
+    `,
+    [userId, cursor?.createdAt || null, cursor?.ticketId || null, input.limit + 1]
+  );
+
+  const hasMore = result.rows.length > input.limit;
+  const pageRows = result.rows.slice(0, input.limit);
+  const lastRow = pageRows.at(-1);
+
+  return {
+    tickets: pageRows.map((row) => ({
+      ticketId: row.ticketId,
+      quoteId: row.quoteId,
+      status: row.status,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+      stakeUsd: microUsdToUsd(row.stakeMicroUsd),
+      operationFeeUsd: microUsdToUsd(row.operationFeeMicroUsd),
+      amountPaidUsd: microUsdToUsd(BigInt(row.stakeMicroUsd) + BigInt(row.operationFeeMicroUsd)),
+      potentialPayoutUsd: microUsdToUsd(row.potentialPayoutMicroUsd),
+      claimableAmountUsd: claimableAmountUsd(row.stakeMicroUsd, row.potentialPayoutMicroUsd, row.hasVoidedLeg),
+      accountingMode: row.accountingMode,
+      currency: row.currency,
+      legs: Number(row.legs),
+      legStatusCounts: {
+        pending: Number(row.pendingLegs),
+        won: Number(row.wonLegs),
+        lost: Number(row.lostLegs),
+        voided: Number(row.voidedLegs),
+        disputed: Number(row.disputedLegs)
+      }
+    })),
+    pageInfo: {
+      limit: input.limit,
+      hasMore,
+      nextCursor: hasMore && lastRow ? encodeClaimableTicketsCursor({ createdAt: lastRow.cursorCreatedAt, ticketId: lastRow.ticketId }) : undefined
+    }
+  };
 }
 
 export async function getTicket(ticketId: string, userId: string): Promise<TicketDetail | undefined> {
@@ -563,6 +889,7 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
     currency: string;
     purchaseTxHash: string | null;
     purchaseChainId: number | null;
+    hasVoidedLeg: boolean;
   }>(
     `
       SELECT
@@ -577,7 +904,13 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
         tickets.accounting_mode AS "accountingMode",
         tickets.funding_currency AS "currency",
         purchase_payment.tx_hash AS "purchaseTxHash",
-        purchase_payment.chain_id AS "purchaseChainId"
+        purchase_payment.chain_id AS "purchaseChainId",
+        EXISTS (
+          SELECT 1
+          FROM ticket_legs AS settlement_legs
+          WHERE settlement_legs.ticket_id = tickets.id
+            AND settlement_legs.status = 'voided'
+        ) AS "hasVoidedLeg"
       FROM tickets
       JOIN quotes ON quotes.id = tickets.quote_id
       LEFT JOIN LATERAL (
@@ -641,8 +974,9 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
     updatedAt: ticket.updatedAt.toISOString(),
     stakeUsd: Number(ticket.stakeMicroUsd) / 1_000_000,
     operationFeeUsd: Number(ticket.operationFeeMicroUsd) / 1_000_000,
-    amountPaidUsd: (Number(ticket.stakeMicroUsd) + Number(ticket.operationFeeMicroUsd)) / 1_000_000,
+    amountPaidUsd: microUsdToUsd(BigInt(ticket.stakeMicroUsd) + BigInt(ticket.operationFeeMicroUsd)),
     potentialPayoutUsd: Number(ticket.potentialPayoutMicroUsd) / 1_000_000,
+    claimableAmountUsd: claimableAmountUsd(ticket.stakeMicroUsd, ticket.potentialPayoutMicroUsd, ticket.hasVoidedLeg),
     accountingMode: ticket.accountingMode,
     currency: ticket.currency,
     purchaseTxHash: ticket.purchaseTxHash || undefined,

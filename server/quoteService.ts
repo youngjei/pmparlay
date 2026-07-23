@@ -26,7 +26,7 @@ export type QuoteLeg = {
   liquidity?: number;
   bestBid?: number;
   bestAsk?: number;
-  priceSource?: "clob_ask" | "gamma";
+  priceSource?: "clob_ask" | "clob_vwap" | "gamma";
   orderbookTimestamp?: string;
   orderbookHash?: string;
   sourceAsOf?: string;
@@ -148,6 +148,196 @@ export function applyAdditionalRiskChecks(quote: QuoteResponse, additionalChecks
     potentialPayoutUsd: hasBlock ? 0 : quote.potentialPayoutUsd,
     riskDecision,
     riskChecks
+  };
+}
+
+export type RequoteOrderbookEvidence = {
+  requestedNotionalUsd?: number;
+  availableNotionalUsd?: number;
+  bestAsk?: number;
+  executablePrice?: number;
+  vwapAsk?: number;
+  evidenceAsOf?: string;
+  orderbookTimestamp?: string;
+  orderbookHash?: string;
+  priceSource?: QuoteLeg["priceSource"];
+  stale?: boolean;
+  sufficientDepth?: boolean;
+  [key: string]: unknown;
+};
+
+export type PaymentActivationRequote = {
+  quote: QuoteResponse;
+  evidenceByLegId: Map<string, RequoteOrderbookEvidence>;
+};
+
+function numericEvidenceField(evidence: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = evidence[name];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+function stringEvidenceField(evidence: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = evidence[name];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function boolEvidenceField(evidence: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = evidence[name];
+    if (typeof value === "boolean") return value;
+  }
+  return undefined;
+}
+
+function objectEvidenceField(outcome: MarketOutcome): Record<string, unknown> | undefined {
+  const record = outcome as unknown as Record<string, unknown>;
+  for (const key of ["askDepthEvidence", "orderbookEvidence", "executionEvidence", "depthEvidence"]) {
+    const value = record[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  }
+
+  const topLevelEvidence: Record<string, unknown> = {};
+  for (const key of [
+    "requestedNotionalUsd",
+    "availableNotionalUsd",
+    "availableAskNotionalUsd",
+    "executableNotionalUsd",
+    "vwapAsk",
+    "vwapPrice",
+    "bestAsk",
+    "executablePrice",
+    "orderbookTimestamp",
+    "orderbookHash",
+    "evidenceAsOf",
+    "sourceAsOf",
+    "priceSource",
+    "sufficientDepth",
+    "stale"
+  ]) {
+    if (record[key] !== undefined) topLevelEvidence[key] = record[key];
+  }
+  return Object.keys(topLevelEvidence).length > 0 ? topLevelEvidence : undefined;
+}
+
+function orderbookEvidence(outcome: MarketOutcome, requestedNotionalUsdPerLeg: number): RequoteOrderbookEvidence | undefined {
+  const raw = objectEvidenceField(outcome);
+  if (!raw) return undefined;
+
+  return {
+    ...raw,
+    requestedNotionalUsd:
+      numericEvidenceField(raw, ["requestedNotionalUsd", "requestedUsd", "notionalUsd"]) ?? requestedNotionalUsdPerLeg,
+    availableNotionalUsd:
+      numericEvidenceField(raw, ["availableNotionalUsd", "availableAskNotionalUsd", "executableNotionalUsd", "askDepthUsd"]) ??
+      outcome.availableAskNotionalUsd,
+    bestAsk: numericEvidenceField(raw, ["bestAsk"]) ?? outcome.bestAsk,
+    executablePrice: numericEvidenceField(raw, ["executablePrice", "vwapAsk", "vwapPrice", "askVwap", "price"]) ?? outcome.executablePrice ?? outcome.price,
+    vwapAsk: numericEvidenceField(raw, ["vwapAsk", "vwapPrice", "askVwap", "price"]) ?? outcome.vwapPrice ?? outcome.executablePrice ?? outcome.price,
+    evidenceAsOf: stringEvidenceField(raw, ["evidenceAsOf", "asOf", "sourceAsOf"]),
+    orderbookTimestamp: stringEvidenceField(raw, ["orderbookTimestamp", "capturedAt"]),
+    orderbookHash: stringEvidenceField(raw, ["orderbookHash", "bookHash"]) ?? outcome.orderbookHash,
+    priceSource: (stringEvidenceField(raw, ["priceSource"]) as QuoteLeg["priceSource"] | undefined) ?? outcome.priceSource,
+    stale: boolEvidenceField(raw, ["stale", "isStale"]),
+    sufficientDepth: boolEvidenceField(raw, ["sufficientDepth", "hasSufficientDepth"])
+  };
+}
+
+function evidenceTimestamp(evidence: RequoteOrderbookEvidence) {
+  const timestamp = evidence.orderbookTimestamp || evidence.evidenceAsOf;
+  if (!timestamp) return undefined;
+  const value = new Date(timestamp).getTime();
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function validateRequoteEvidence(
+  outcome: MarketOutcome,
+  input: {
+    requestedNotionalUsdPerLeg: number;
+    requireDepthEvidence: boolean;
+    maxEvidenceAgeMs: number;
+    nowMs: number;
+  }
+) {
+  const evidence = orderbookEvidence(outcome, input.requestedNotionalUsdPerLeg);
+  if (!evidence) {
+    if (input.requireDepthEvidence) throw new Error("stale_book");
+    return undefined;
+  }
+
+  if (evidence.stale) throw new Error("stale_book");
+  if (!evidence.orderbookHash || evidence.bestAsk === undefined || evidence.executablePrice === undefined) {
+    throw new Error("stale_book");
+  }
+  const timestamp = evidenceTimestamp(evidence);
+  if (!timestamp || input.nowMs - timestamp > input.maxEvidenceAgeMs || timestamp - input.nowMs > 30_000) {
+    throw new Error("stale_book");
+  }
+
+  if (evidence.sufficientDepth === false) throw new Error("insufficient_depth");
+  if (evidence.availableNotionalUsd !== undefined && evidence.availableNotionalUsd + 1e-9 < input.requestedNotionalUsdPerLeg) {
+    throw new Error("insufficient_depth");
+  }
+  if (evidence.requestedNotionalUsd !== undefined && evidence.requestedNotionalUsd + 1e-9 < input.requestedNotionalUsdPerLeg) {
+    throw new Error("insufficient_depth");
+  }
+
+  return evidence;
+}
+
+export function createPaymentActivationRequote(
+  originalQuote: QuoteResponse,
+  catalog: MarketCatalogSnapshot,
+  options: {
+    requestedNotionalUsdPerLeg: number;
+    ttlMs?: number;
+    requireDepthEvidence?: boolean;
+    maxEvidenceAgeMs?: number;
+    nowMs?: number;
+  }
+): PaymentActivationRequote {
+  const nowMs = options.nowMs ?? Date.now();
+  const outcomesById = new Map(catalog.outcomes.map((outcome) => [outcome.id, outcome]));
+  const selected: MarketOutcome[] = [];
+  const evidenceByLegId = new Map<string, RequoteOrderbookEvidence>();
+
+  for (const leg of originalQuote.legs) {
+    const outcome = outcomesById.get(leg.id);
+    if (!outcome) throw new Error("market_closed");
+    if (outcome.endDate && new Date(outcome.endDate).getTime() <= nowMs) throw new Error("market_closed");
+
+    const evidence = validateRequoteEvidence(outcome, {
+      requestedNotionalUsdPerLeg: options.requestedNotionalUsdPerLeg,
+      requireDepthEvidence: options.requireDepthEvidence ?? true,
+      maxEvidenceAgeMs: options.maxEvidenceAgeMs ?? 30_000,
+      nowMs
+    });
+    if (evidence) evidenceByLegId.set(outcome.id, evidence);
+    selected.push(outcome);
+  }
+
+  const quote = createQuote(
+    {
+      stakeUsd: originalQuote.stakeUsd,
+      legs: selected.map((outcome) => ({ id: outcome.id }))
+    },
+    {
+      ...catalog,
+      outcomes: selected
+    },
+    options.ttlMs
+  );
+
+  return {
+    quote,
+    evidenceByLegId
   };
 }
 

@@ -1,77 +1,73 @@
+import { hydrateOutcomesWithOrderBooks } from "../src/marketData";
 import { closePool } from "./db/client";
-import { getPersistedMarketCatalog } from "./db/marketRepository";
-import { fetchLiveMarketCatalog } from "./marketCatalog";
+import { getMarketCatalogSweepState, getPersistedMarketCatalogPage } from "./db/marketRepository";
+import { annotateCatalogOutcomes, isMarketCurrentlyLive, marketEligibilityConfigFromEnv } from "./marketTaxonomy";
 
-const maxAgeMs = Number(process.env.MARKET_QA_MAX_AGE_MS || 30_000);
-const maxPriceDiff = Number(process.env.MARKET_QA_MAX_PRICE_DIFF || 0.05);
-
-function keyFor(outcome: { marketId: string; outcome: string }) {
-  return `${outcome.marketId}:${outcome.outcome}`;
-}
+const maxCompletionAgeMs = Number(process.env.MARKET_QA_MAX_COMPLETION_AGE_MS || 6 * 60 * 60_000);
+const maxProgressAgeMs = Number(process.env.MARKET_QA_MAX_PROGRESS_AGE_MS || 5 * 60_000);
+const maxSnapshotAgeMs = Number(process.env.MARKET_QA_MAX_SNAPSHOT_AGE_MS || maxCompletionAgeMs);
+const sampleSize = Math.min(Math.max(Number(process.env.MARKET_QA_SAMPLE_SIZE || 48), 1), 100);
 
 try {
-  const persisted = await getPersistedMarketCatalog();
-  const ageMs = Date.now() - new Date(persisted.asOf).getTime();
-  const live = await fetchLiveMarketCatalog(0);
-  const liveByKey = new Map(live.outcomes.map((outcome) => [keyFor(outcome), outcome]));
-  const persistedKeys = new Set(persisted.outcomes.map(keyFor));
-  const missingLiveKeys = live.outcomes
-    .filter((outcome) => !persistedKeys.has(keyFor(outcome)))
-    .map((outcome) => ({
-      question: outcome.question,
-      outcome: outcome.outcome,
-      price: outcome.price
-    }))
-    .slice(0, 20);
-  const mismatches = persisted.outcomes
-    .map((outcome) => {
-      const liveOutcome = liveByKey.get(keyFor(outcome));
-      if (!liveOutcome) return undefined;
-      const priceDiff = Math.abs(outcome.price - liveOutcome.price);
-      if (priceDiff <= maxPriceDiff) return undefined;
-      return {
-        question: outcome.question,
-        outcome: outcome.outcome,
-        persistedPrice: outcome.price,
-        livePrice: liveOutcome.price,
-        priceDiff
-      };
-    })
-    .filter(Boolean)
-    .slice(0, 20);
-
-  const report = {
-    persistedAsOf: persisted.asOf,
-    liveAsOf: live.asOf,
-    ageMs,
-    persistedOutcomes: persisted.outcomes.length,
-    liveOutcomes: live.outcomes.length,
-    comparedOutcomes: persisted.outcomes.filter((outcome) => liveByKey.has(keyFor(outcome))).length,
-    missingLiveKeys,
-    mismatches
-  };
-
-  console.log(JSON.stringify(report, null, 2));
-
-  if (!live.complete) {
-    throw new Error(`Live market fetch incomplete: ${live.successfulFeeds || 0}/${live.totalFeeds || 0} feeds succeeded`);
+  const now = new Date();
+  const sweep = await getMarketCatalogSweepState();
+  if (!sweep?.completedAt) {
+    throw new Error("Persisted market discovery has not completed an end-to-end sweep");
   }
 
-  if (!persisted.complete) {
-    throw new Error(`Persisted market catalog was produced by an incomplete fetch: ${persisted.successfulFeeds || 0}/${persisted.totalFeeds || 0}`);
+  const sweepAgeMs = now.getTime() - new Date(sweep.completedAt).getTime();
+  if (!Number.isFinite(sweepAgeMs) || sweepAgeMs < 0 || sweepAgeMs > maxCompletionAgeMs) {
+    throw new Error(`Last completed market discovery sweep is stale: ${Math.round(sweepAgeMs)}ms old`);
   }
 
-  if (ageMs > maxAgeMs) {
-    throw new Error(`Persisted market catalog is stale: ${Math.round(ageMs)}ms old`);
+  const progressAgeMs = now.getTime() - new Date(sweep.updatedAt).getTime();
+  if (!Number.isFinite(progressAgeMs) || progressAgeMs < 0 || progressAgeMs > maxProgressAgeMs) {
+    throw new Error(`Current market discovery progress is stale: ${Math.round(progressAgeMs)}ms old`);
   }
 
-  if (mismatches.length > 0) {
-    throw new Error(`Persisted market catalog has ${mismatches.length} sampled price mismatches`);
-  }
+  const candidates = await getPersistedMarketCatalogPage({
+    limit: sampleSize,
+    now,
+    requireFreshOrderBook: false,
+    maxSnapshotAgeMs
+  });
+  const malformedIdentity = candidates.outcomes.filter((outcome) => !outcome.conditionId || !outcome.tokenId);
+  const ended = candidates.outcomes.filter((outcome) => !isMarketCurrentlyLive(outcome.endDate, now));
+  if (malformedIdentity.length > 0) throw new Error(`Discovery sample has ${malformedIdentity.length} outcomes without immutable identity`);
+  if (ended.length > 0) throw new Error(`Discovery sample has ${ended.length} ended outcomes`);
 
-  if (missingLiveKeys.length > 0) {
-    throw new Error(`Persisted market catalog is missing ${missingLiveKeys.length} sampled live outcomes`);
-  }
+  const refreshed = await hydrateOutcomesWithOrderBooks(candidates.outcomes, undefined, {
+    requestedNotionalUsd: 25,
+    retainUnexecutable: true,
+    requireExplicitLifecycle: true
+  });
+  if (!refreshed.complete) throw new Error("CLOB hydration was incomplete for the public discovery sample");
+
+  const quoteable = annotateCatalogOutcomes(refreshed.outcomes, {
+    now: new Date(),
+    eligibilityConfig: {
+      ...marketEligibilityConfigFromEnv(),
+      requireOrderBook: true
+    }
+  }).filter((outcome) => outcome.eligibility?.eligible === true);
+  if (quoteable.length === 0) throw new Error("No quoteable outcomes remained after current CLOB hydration");
+
+  console.log(
+    JSON.stringify(
+      {
+        sweepCompletedAt: sweep.completedAt,
+        sweepAgeMs,
+        sweepProgressAgeMs: progressAgeMs,
+        sweepPages: sweep.successfulPages,
+        sourceMarketIdsSeen: sweep.seenMarketIds.length,
+        candidateOutcomes: candidates.outcomes.length,
+        quoteableOutcomes: quoteable.length,
+        filteredOutcomes: refreshed.outcomes.length - quoteable.length
+      },
+      null,
+      2
+    )
+  );
 } finally {
   await closePool();
 }

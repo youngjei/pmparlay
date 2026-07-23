@@ -56,9 +56,9 @@ base spread
 Initial production posture:
 
 ```text
-Clean, liquid, uncorrelated baskets: 10-15%
-Thin markets: up to the published spread cap
-Correlated baskets: up to the published spread cap, then review
+Clean, liquid, uncorrelated baskets: 7%
+Thin or explainably related markets: up to the published 12% cap
+Unsupported or unpriceable correlation: unavailable
 Unhedgeable large tickets: reject
 ```
 
@@ -77,9 +77,9 @@ Examples of correlated groups:
 - Same tournament/team/player.
 - Same settlement oracle or source event.
 
-Some same-event baskets are normal user behavior, not abuse. For example, a user who believes Morocco will win the World Cup may select Morocco Yes plus USA No and Mexico No. That should usually be reviewable with a capped spread, not automatically blocked. Longer term, these event-family baskets need conditional or combinatorial pricing rather than naive independent multiplication.
+Some same-event baskets are normal user behavior, but naive multiplication cannot price them safely. Launch therefore allows one selection per Polymarket event. Event-family combinations may return later only with conditional or combinatorial pricing.
 
-MVP can use deterministic grouping rules. Production should add:
+Launch uses deterministic grouping rules. Later validation may add:
 
 - taxonomy-based grouping,
 - entity extraction,
@@ -137,8 +137,10 @@ For a real-money alpha:
 - max payout: low hundreds,
 - quote expiry: 5-15 seconds,
 - only verified live markets,
-- review correlated baskets instead of blocking normal same-event theses,
-- dynamic spread starting at 10% with a published cap,
+- one selection per Polymarket event,
+- dynamic spread starting at 7% with a published 12% cap,
+- $0.50 operation fee per leg,
+- reject unsupported correlation instead of showing a punitive quote,
 - reject when executable depth is unavailable,
 - reserve full worst-case payout,
 - keep AI advisory only.

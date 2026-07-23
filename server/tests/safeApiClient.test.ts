@@ -29,9 +29,27 @@ describe("Safe API client", () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           authorization: "Bearer safe-test-key-that-must-not-leak"
-        })
+        }),
+        signal: expect.any(AbortSignal)
       })
     );
+  });
+
+  it("bounds Safe API reads and composes a caller cancellation signal", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async (_url: string, options?: RequestInit) => {
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      expect(options?.signal).not.toBe(controller.signal);
+      expect(options?.signal?.aborted).toBe(false);
+      controller.abort();
+      expect(options?.signal?.aborted).toBe(true);
+      return new Response(JSON.stringify({ address: "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B" }), { status: 200 });
+    });
+    const client = new SafeApiClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await client.getSafeInfo(11155111, "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B", { signal: controller.signal });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("returns sanitized HTTP errors", async () => {
@@ -51,6 +69,38 @@ describe("Safe API client", () => {
       status: 401,
       message: "safe_api_http_401"
     } satisfies Partial<SafeApiError>);
+  });
+
+  it("maps network and timeout failures to sanitized client errors", async () => {
+    const networkClient = new SafeApiClient({
+      fetchImpl: vi.fn(async () => {
+        throw new Error("request to https://api.safe.global/secret failed");
+      }) as unknown as typeof fetch
+    });
+    await expect(networkClient.getSafeInfo(11155111, "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B")).rejects.toMatchObject({
+      name: "SafeApiError",
+      status: 0,
+      message: "safe_api_request_failed"
+    } satisfies Partial<SafeApiError>);
+
+    const timeoutController = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+    try {
+      const timeoutClient = new SafeApiClient({
+        fetchImpl: vi.fn(async () => {
+          timeoutController.abort();
+          throw new DOMException("request timed out", "TimeoutError");
+        }) as unknown as typeof fetch
+      });
+      await expect(timeoutClient.getSafeInfo(11155111, "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B")).rejects.toMatchObject({
+        name: "SafeApiError",
+        status: 408,
+        message: "safe_api_timeout"
+      } satisfies Partial<SafeApiError>);
+      expect(timeout).toHaveBeenCalledWith(10_000);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it("redacts secrets for diagnostics", () => {

@@ -9,6 +9,12 @@ type SafeApiClientOptions = {
   fetchImpl?: FetchLike;
 };
 
+type SafeApiRequestOptions = {
+  signal?: AbortSignal;
+};
+
+const outboundReadTimeoutMs = 10_000;
+
 export type SafeInfo = {
   address: string;
   nonce?: number;
@@ -69,17 +75,25 @@ export class SafeApiClient {
     this.fetchImpl = options.fetchImpl || fetch;
   }
 
-  async getSafeInfo(chainId: number, safeAddress: string): Promise<SafeInfo> {
+  async getSafeInfo(chainId: number, safeAddress: string, options: SafeApiRequestOptions = {}): Promise<SafeInfo> {
     const prefix = safeChainPrefix(chainId);
     const address = getAddress(safeAddress);
-    return this.request<SafeInfo>(`/tx-service/${prefix}/api/v1/safes/${address}/`);
+    return this.request<SafeInfo>(`/tx-service/${prefix}/api/v1/safes/${address}/`, options.signal);
   }
 
-  private async request<T>(path: string): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "GET",
-      headers: safeApiHeaders(this.apiKey)
-    });
+  private async request<T>(path: string, callerSignal?: AbortSignal): Promise<T> {
+    const timeoutSignal = AbortSignal.timeout(outboundReadTimeoutMs);
+    const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: "GET",
+        headers: safeApiHeaders(this.apiKey),
+        signal
+      });
+    } catch {
+      throw new SafeApiError(timeoutSignal.aborted ? 408 : 0, timeoutSignal.aborted ? "safe_api_timeout" : "safe_api_request_failed");
+    }
 
     if (!response.ok) {
       throw new SafeApiError(response.status, `safe_api_http_${response.status}`);

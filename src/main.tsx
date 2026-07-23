@@ -1,241 +1,90 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
-import { PrivyProvider, useIdentityToken, usePrivy, useWallets } from "@privy-io/react-auth";
+import { lazy, StrictMode, Suspense, useCallback, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { createPublicClient, createWalletClient, custom, erc20Abi, formatUnits, http } from "viem";
-import { mainnet, sepolia } from "viem/chains";
 import App from "./App";
+import type { WalletRuntimeAuth } from "./WalletRuntime";
 import "./styles.css";
 
+const circleSepoliaUsdcContractAddress = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+const sepoliaChainId = 11155111;
 const privyAppId = import.meta.env.VITE_PRIVY_APP_ID as string | undefined;
 const walletConnectCloudProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
 const privyEnabled = import.meta.env.VITE_ENABLE_PRIVY === "true";
-const configuredSettlementChainId = Number(import.meta.env.VITE_SETTLEMENT_CHAIN_ID || sepolia.id);
+const configuredSettlementChainId = Number(import.meta.env.VITE_SETTLEMENT_CHAIN_ID || sepoliaChainId);
 const configuredUsdcContractAddress =
-  (import.meta.env.VITE_USDC_CONTRACT_ADDRESS as string | undefined) || "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+  (import.meta.env.VITE_USDC_CONTRACT_ADDRESS as string | undefined) || circleSepoliaUsdcContractAddress;
 
-type WalletSyncStatus = "idle" | "syncing" | "synced" | "limited" | "error";
-type WalletBalanceState = "idle" | "loading" | "ready" | "error";
+const walletPaymentConfigSupported =
+  configuredSettlementChainId === sepoliaChainId &&
+  configuredUsdcContractAddress.toLowerCase() === circleSepoliaUsdcContractAddress.toLowerCase();
+const walletSessionHintKey = "legwork.wallet-session";
 
-function supportedSettlementChain(chainId: number) {
-  if (chainId === mainnet.id) return mainnet;
-  if (chainId === sepolia.id) return sepolia;
-  return undefined;
-}
+const WalletRuntime = lazy(() => import("./WalletRuntime"));
 
-function LegworkApp() {
-  const privy = usePrivy();
-  const { identityToken } = useIdentityToken();
-  const { wallets } = useWallets();
-  const syncedIdentityToken = useRef<string | null>(null);
-  const [walletSynced, setWalletSynced] = useState(false);
-  const [walletSyncStatus, setWalletSyncStatus] = useState<WalletSyncStatus>("idle");
-  const [walletSyncError, setWalletSyncError] = useState("");
-  const [walletSyncRetryKey, setWalletSyncRetryKey] = useState(0);
-  const [walletBalanceState, setWalletBalanceState] = useState<WalletBalanceState>("idle");
-  const [walletUsdcBalance, setWalletUsdcBalance] = useState<number | null>(null);
-  const [walletBalanceError, setWalletBalanceError] = useState("");
-  const walletLabel = wallets[0]?.address ? `${wallets[0].address.slice(0, 6)}...${wallets[0].address.slice(-4)}` : "Wallet connected";
+const initialWalletAuth: WalletRuntimeAuth = {
+  authenticated: false,
+  ready: false,
+  walletSynced: false,
+  walletSyncStatus: "idle",
+  walletSyncError: "",
+  walletUsdcBalance: null,
+  walletBalanceState: "idle",
+  walletBalanceError: "",
+  userLabel: "Wallet connected",
+  getAccessToken: async () => null,
+  sendUsdcPayment: async () => {
+    throw new Error("Connected wallet payment is unavailable. Reconnect your wallet and try again.");
+  },
+  retryWalletSync: () => {},
+  logout: () => {}
+};
 
-  async function sendUsdcPayment(input: { treasuryAddress: string; usdcContractAddress: string; amountMicroUnits: string; chainId: number }) {
-    const wallet = wallets[0];
-    if (!wallet) throw new Error("No connected wallet found.");
-    const chain = supportedSettlementChain(input.chainId);
-    if (!chain) {
-      throw new Error("LEGWORK currently supports USDC purchases on Ethereum mainnet and Sepolia.");
-    }
-    if (wallet.chainId !== `eip155:${input.chainId}`) {
-      await wallet.switchChain(input.chainId);
-    }
-    const provider = await wallet.getEthereumProvider();
-    const client = createWalletClient({
-      account: wallet.address as `0x${string}`,
-      chain,
-      transport: custom(provider)
-    });
-    return await client.writeContract({
-      address: input.usdcContractAddress as `0x${string}`,
-      abi: erc20Abi,
-      functionName: "transfer",
-      args: [input.treasuryAddress as `0x${string}`, BigInt(input.amountMicroUnits)]
-    });
-  }
+function WalletEnabledApp() {
+  const [connectIntent, setConnectIntent] = useState(0);
+  const [runtimeRequested, setRuntimeRequested] = useState(
+    () => window.localStorage.getItem(walletSessionHintKey) === "1"
+  );
+  const [runtimeReported, setRuntimeReported] = useState(false);
+  const [walletAuth, setWalletAuth] = useState<WalletRuntimeAuth>(initialWalletAuth);
+  const requestWalletConnection = useCallback(() => {
+    setRuntimeRequested(true);
+    setConnectIntent((intent) => intent + 1);
+  }, []);
+  const handleAuthChange = useCallback((nextAuth: WalletRuntimeAuth) => {
+    if (nextAuth.authenticated) window.localStorage.setItem(walletSessionHintKey, "1");
+    else if (nextAuth.ready) window.localStorage.removeItem(walletSessionHintKey);
+    setWalletAuth(nextAuth);
+    setRuntimeReported(true);
+  }, []);
 
-  useEffect(() => {
-    const wallet = wallets[0];
-    const chain = supportedSettlementChain(configuredSettlementChainId);
-    if (!privy.authenticated || !wallet || !chain) {
-      setWalletUsdcBalance(null);
-      setWalletBalanceState("idle");
-      setWalletBalanceError("");
-      return;
-    }
-
-    let isMounted = true;
-    setWalletBalanceState("loading");
-    setWalletBalanceError("");
-
-    const client = createPublicClient({
-      chain,
-      transport: http()
-    });
-
-    client
-      .readContract({
-        address: configuredUsdcContractAddress as `0x${string}`,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [wallet.address as `0x${string}`]
-      })
-      .then((balance) => {
-        if (!isMounted) return;
-        setWalletUsdcBalance(Number(formatUnits(balance, 6)));
-        setWalletBalanceState("ready");
-      })
-      .catch((error: unknown) => {
-        if (!isMounted) return;
-        setWalletUsdcBalance(null);
-        setWalletBalanceState("error");
-        setWalletBalanceError(error instanceof Error ? error.message : "USDC balance unavailable.");
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [privy.authenticated, wallets[0]?.address]);
-
-  useEffect(() => {
-    if (!privy.authenticated) {
-      syncedIdentityToken.current = null;
-      setWalletSynced(false);
-      setWalletSyncStatus("idle");
-      setWalletSyncError("");
-      return;
-    }
-    if (!privy.ready) {
-      setWalletSynced(false);
-      setWalletSyncStatus("syncing");
-      setWalletSyncError("");
-      return;
-    }
-    if (!identityToken) {
-      syncedIdentityToken.current = null;
-      setWalletSynced(false);
-      setWalletSyncStatus("syncing");
-      setWalletSyncError("");
-
-      const timeout = window.setTimeout(() => {
-        setWalletSyncStatus("limited");
-        setWalletSyncError("Your account is connected. LEGWORK is still waiting for wallet details from Privy, so wallet-specific actions may take a moment to appear.");
-      }, 8_000);
-
-      return () => window.clearTimeout(timeout);
-    }
-    if (syncedIdentityToken.current === identityToken) {
-      setWalletSynced(true);
-      setWalletSyncStatus("synced");
-      setWalletSyncError("");
-      return;
-    }
-
-    const controller = new AbortController();
-    syncedIdentityToken.current = identityToken;
-    setWalletSynced(false);
-    setWalletSyncStatus("syncing");
-    setWalletSyncError("");
-
-    void (async () => {
-      const accessToken = await privy.getAccessToken();
-      if (controller.signal.aborted) return;
-      if (!accessToken) {
-        syncedIdentityToken.current = null;
-        setWalletSynced(false);
-        setWalletSyncStatus("error");
-        setWalletSyncError("LEGWORK could not verify this session. Reconnect your wallet to continue.");
-        return;
-      }
-
-      const response = await fetch("/api/auth/privy/sync", {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${accessToken}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ identityToken }),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        syncedIdentityToken.current = null;
-        setWalletSynced(false);
-        setWalletSyncStatus("limited");
-        setWalletSyncError("Your account is connected, but LEGWORK could not refresh wallet details yet. Portfolio data can still load.");
-        return;
-      }
-
-      setWalletSynced(true);
-      setWalletSyncStatus("synced");
-      setWalletSyncError("");
-    })().catch((error: unknown) => {
-      if (!controller.signal.aborted) {
-        syncedIdentityToken.current = null;
-        setWalletSynced(false);
-        setWalletSyncStatus("limited");
-        setWalletSyncError(error instanceof Error ? error.message : "Your account is connected, but wallet details are still syncing.");
-      }
-    });
-
-    return () => controller.abort();
-  }, [identityToken, privy.authenticated, privy.ready, walletSyncRetryKey]);
+  const auth = useMemo(
+    () => ({
+      enabled: true,
+      ...walletAuth,
+      ready: connectIntent === 0 && !runtimeReported ? true : walletAuth.ready,
+      login: requestWalletConnection
+    }),
+    [connectIntent, requestWalletConnection, runtimeReported, walletAuth]
+  );
 
   return (
-    <App
-      auth={{
-        enabled: true,
-        authenticated: privy.authenticated,
-        ready: privy.ready,
-        walletSynced,
-        walletSyncStatus,
-        walletSyncError,
-        walletUsdcBalance,
-        walletBalanceState,
-        walletBalanceError,
-        userLabel: walletLabel,
-        getAccessToken: privy.getAccessToken,
-        sendUsdcPayment,
-        login: privy.login,
-        retryWalletSync: () => setWalletSyncRetryKey((key) => key + 1),
-        logout: () => {
-          void privy.logout();
-        }
-      }}
-    />
+    <>
+      <App auth={auth} />
+      {runtimeRequested ? (
+        <Suspense fallback={null}>
+          <WalletRuntime
+            appId={privyAppId!}
+            walletConnectCloudProjectId={walletConnectCloudProjectId}
+            configuredUsdcContractAddress={configuredUsdcContractAddress}
+            connectIntent={connectIntent}
+            onAuthChange={handleAuthChange}
+          />
+        </Suspense>
+      ) : null}
+    </>
   );
 }
 
-const app = privyEnabled && privyAppId ? (
-  <PrivyProvider
-    appId={privyAppId}
-    config={{
-      loginMethods: ["wallet"],
-      appearance: {
-        theme: "light",
-        accentColor: "#86ef00",
-        logo: undefined
-      },
-      embeddedWallets: {
-        ethereum: {
-          createOnLogin: "off"
-        }
-      },
-      walletConnectCloudProjectId
-    }}
-  >
-    <LegworkApp />
-  </PrivyProvider>
-) : (
-  <App />
-);
+const app = privyEnabled && privyAppId && walletPaymentConfigSupported ? <WalletEnabledApp /> : <App />;
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

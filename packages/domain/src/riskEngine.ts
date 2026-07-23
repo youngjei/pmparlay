@@ -41,8 +41,8 @@ export type RiskPolicy = {
 };
 
 export const DEFAULT_RISK_POLICY: RiskPolicy = {
-  baseSpreadBps: 1_000,
-  operationFeePerLegUsd: 1,
+  baseSpreadBps: 700,
+  operationFeePerLegUsd: 0.5,
   maxStakeUsd: 25,
   maxLegs: 8,
   maxGrossPayoutUsd: 250,
@@ -53,7 +53,7 @@ export const DEFAULT_RISK_POLICY: RiskPolicy = {
   manualReviewStakeUsd: 25,
   manualReviewLegs: 5,
   manualReviewPayoutShare: 0.8,
-  maxSpreadBps: 2_000
+  maxSpreadBps: 1_200
 };
 
 const keywordGroups = [

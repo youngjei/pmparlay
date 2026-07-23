@@ -1,104 +1,74 @@
-# Database Setup
+# LEGWORK Database Operations
 
-LEGWORK uses Postgres as the source of truth.
+Status: Current development guide
+Last updated: 2026-07-13
 
-## Local Development
+Postgres is LEGWORK's financial and product source of truth. Redis/BullMQ coordinates jobs but is not authoritative for balances, tickets, payments, settlement, or reconciliation.
 
-Use Docker Postgres:
+## Local Setup
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres
+docker compose up -d postgres redis
 npm run db:migrate
 npm run index:markets
 npm run db:stats
 ```
 
-Periodic maintenance:
+For the isolated supervised Sepolia database, keep the existing state containers and run:
 
 ```bash
+npm run staging:provision
+npm run staging:qa
+npm run staging:run
+```
+
+This uses `legwork_sepolia_staging` and Redis database 1. It never imports the development ledger. `npm run staging:reset` is an explicit destructive rebuild of only the safety-prefixed staging database.
+
+Run the complete local product with API and financial workers:
+
+```bash
+npm run dev:local
+```
+
+## Schema Ownership
+
+SQL migrations in `server/db/migrations` are append-only after deployment. They cover:
+
+- users, Privy wallet identities, and treasury configuration;
+- market snapshots, eligibility, event groups, and index sweep state;
+- quotes, quote legs, payment intents, exposure reservations, and tickets;
+- double-entry ledger accounts and entries;
+- onchain deposits, withdrawals, Safe proposal evidence, and reorg handling;
+- CTF settlement identity, proof history, claims, and quarantine;
+- reconciliation snapshots, incidents, financial gates, audit logs, and outbox delivery.
+
+Repository helpers must not create schema at runtime. A fresh database must reach the current schema using only `npm run db:migrate`.
+
+## Operational Rules
+
+- Never put `DATABASE_URL` in browser variables or committed files.
+- Use separate databases and credentials for local, Sepolia staging, and mainnet.
+- The API and each worker receive least-privilege credentials; migration credentials are separate.
+- Staging must enable encrypted backups and point-in-time recovery before handling supervised funds.
+- Run migration, rollback/recovery, and restore drills against a copy of staging data before mainnet review.
+- Financial tables and accepted settlement evidence are append-only or changed only through audited compensating transactions.
+
+## Hosted Database
+
+The hosted Postgres vendor remains an explicit architecture decision. Selection must compare connection limits, transaction semantics, backups/PITR, region, maintenance windows, observability, and migration portability. The current schema uses ordinary Postgres and should not depend on vendor-specific database APIs.
+
+## Useful Commands
+
+```bash
+npm run db:migrate
+npm run db:stats
+npm run db:latest
 npm run db:maintenance
-```
-
-This currently removes expired idempotency keys and marks stale quoted rows as `expired`.
-
-Current local scripts:
-
-- `npm run db:migrate`: applies SQL migrations.
-- `npm run index:markets`: fetches live Polymarket markets and persists market snapshots.
-- `npm run queue:index-markets`: enqueues a BullMQ market indexing job.
-- `npm run worker:markets`: runs the market indexing worker.
-- `npm run db:stats`: prints table counts.
-
-## Recommended Free Hosted Database
-
-Use Neon Postgres first.
-
-Reasons:
-
-- Postgres-compatible and easy to migrate away from later.
-- Free tier is suitable for prototype database workloads.
-- Branching is useful for staging and preview environments.
-- It keeps LEGWORK backend-owned instead of tying core architecture to a BaaS too early.
-
-Use Supabase instead if the near-term priority becomes bundled auth/storage/realtime.
-
-Avoid treating Railway as the dependable free database default. Its free path is
-credit/trial-style and is better for quick deployment experiments than a stable database
-foundation.
-
-## Hosted Setup
-
-1. Create a Neon project.
-2. Copy the pooled or direct Postgres connection string.
-3. Set `DATABASE_URL` in the server environment, not in committed files.
-4. Run:
-
-```bash
-npm run db:migrate
 npm run index:markets
-npm run db:stats
+npm run queue:index-markets
+npm run worker:markets
+npm run worker:reconciliation
 ```
 
-## Migration Notes
-
-Everything in the current schema is ordinary Postgres:
-
-- no Neon-specific extensions,
-- no Supabase-specific features,
-- no vendor lock-in.
-
-That keeps future migration paths open:
-
-- Neon free -> Neon paid,
-- Neon -> Supabase,
-- Neon -> managed Postgres/RDS,
-- local Docker -> hosted Postgres.
-
-## Current Schema Coverage
-
-Current migrations create:
-
-- users,
-- markets,
-- market outcomes,
-- market snapshots,
-- policy versions,
-- quotes,
-- quote legs,
-- risk checks,
-- tickets,
-- ticket legs,
-- ledger accounts,
-- ledger entries,
-- settlements,
-- audit log,
-- outbox.
-
-Still missing:
-
-- auth tables from the final auth provider,
-- Redis-backed job/lock state,
-- exposure counters,
-- settlement worker checkpoints,
-- admin/operator permissions.
+Before staging deployment, add and verify a migration smoke test that creates an empty database, applies every migration, checks constraints/triggers, and exercises concurrent financial mutations against real Postgres.

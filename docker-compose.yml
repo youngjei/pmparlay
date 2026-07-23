@@ -1,3 +1,17 @@
+x-production-config: &production-config
+  RATE_LIMIT_BACKEND: redis
+  RATE_LIMIT_SKIP_ON_REDIS_ERROR: "false"
+  POLYGON_SETTLEMENT_CHAIN_ID: ${POLYGON_SETTLEMENT_CHAIN_ID:-137}
+  SETTLEMENT_RPC_QUORUM: ${SETTLEMENT_RPC_QUORUM:-2}
+  POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+  POLYGON_RPC_OPERATOR: ${POLYGON_RPC_OPERATOR:-}
+  POLYGON_SECONDARY_RPC_URL: ${POLYGON_SECONDARY_RPC_URL:-}
+  POLYGON_SECONDARY_RPC_OPERATOR: ${POLYGON_SECONDARY_RPC_OPERATOR:-}
+  POLYGON_TERTIARY_RPC_URL: ${POLYGON_TERTIARY_RPC_URL:-}
+  POLYGON_TERTIARY_RPC_OPERATOR: ${POLYGON_TERTIARY_RPC_OPERATOR:-}
+  USDC_REQUIRED_CONFIRMATIONS: ${USDC_REQUIRED_CONFIRMATIONS:-12}
+  OPS_API_KEY: ${OPS_API_KEY:?OPS_API_KEY is required}
+
 services:
   migrate:
     build:
@@ -5,20 +19,20 @@ services:
       dockerfile: Dockerfile.api
     container_name: legwork-migrate
     profiles: ["app", "worker"]
-    command: ["npm", "run", "db:migrate"]
+    command: ["sh", "-c", "npm run db:migrate && npm run db:backfill-settlement-identities"]
     environment:
+      <<: *production-config
       NODE_ENV: production
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
     depends_on:
       postgres:
@@ -32,27 +46,26 @@ services:
     profiles: ["app"]
     restart: unless-stopped
     environment:
+      <<: *production-config
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: 8787
-      WEB_ORIGIN: http://localhost:5173
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:5173}
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      RATE_LIMIT_BACKEND: redis
-      RATE_LIMIT_SKIP_ON_REDIS_ERROR: "false"
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
-      OPS_API_KEY: ${OPS_API_KEY:-}
+      SAFE_API_BASE_URL: ${SAFE_API_BASE_URL:-https://api.safe.global}
+      SAFE_API_KEY: ${SAFE_API_KEY:-}
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -75,21 +88,25 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:worker:markets"]
     environment:
+      <<: *production-config
       NODE_ENV: production
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
+      MARKET_INDEX_INTERVAL_MS: ${MARKET_INDEX_INTERVAL_MS:-60000}
+      MARKET_INDEX_MAX_PAGES: ${MARKET_INDEX_MAX_PAGES:-1}
+      MARKET_INDEX_JOB_TIMEOUT_MS: ${MARKET_INDEX_JOB_TIMEOUT_MS:-120000}
       WORKER_HEARTBEAT_FILE: /tmp/legwork-market-worker.heartbeat
       WORKER_HEARTBEAT_MAX_AGE_MS: 45000
+      WORKER_SUCCESS_MAX_AGE_MS: 180000
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -113,21 +130,22 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:worker:outbox"]
     environment:
+      <<: *production-config
       NODE_ENV: production
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
       WORKER_HEARTBEAT_FILE: /tmp/legwork-outbox-worker.heartbeat
       WORKER_HEARTBEAT_MAX_AGE_MS: 45000
+      WORKER_SUCCESS_MAX_AGE_MS: 180000
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -149,21 +167,22 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:worker:settlements"]
     environment:
+      <<: *production-config
       NODE_ENV: production
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       WORKER_HEARTBEAT_FILE: /tmp/legwork-settlement-worker.heartbeat
       WORKER_HEARTBEAT_MAX_AGE_MS: 45000
+      WORKER_SUCCESS_MAX_AGE_MS: 180000
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -185,26 +204,62 @@ services:
     restart: unless-stopped
     command: ["npm", "run", "start:worker:deposits"]
     environment:
+      <<: *production-config
       NODE_ENV: production
       ACCOUNTING_MODE: house_book_usdc
       LEDGER_CURRENCY: USDC
-      DATABASE_URL: postgres://legwork:legwork_dev_password@postgres:5432/legwork
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
       REDIS_URL: redis://redis:6379
-      BETA_USER_API_KEY: local_dev_beta_key
       SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
       TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
       USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
-      USDC_REQUIRED_CONFIRMATIONS: ${USDC_REQUIRED_CONFIRMATIONS:-3}
       USDC_DEPOSIT_START_BLOCK: ${USDC_DEPOSIT_START_BLOCK:-}
       USDC_DEPOSIT_SCAN_LOOKBACK_BLOCKS: ${USDC_DEPOSIT_SCAN_LOOKBACK_BLOCKS:-5000}
       USDC_DEPOSIT_SCAN_BATCH_BLOCKS: ${USDC_DEPOSIT_SCAN_BATCH_BLOCKS:-2000}
       USDC_DEPOSIT_POLL_INTERVAL_MS: ${USDC_DEPOSIT_POLL_INTERVAL_MS:-30000}
       ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
       SETTLEMENT_REQUIRE_ONCHAIN: ${SETTLEMENT_REQUIRE_ONCHAIN:-true}
-      POLYGON_RPC_URL: ${POLYGON_RPC_URL:-}
+      SETTLEMENT_AUTHORITY: ${SETTLEMENT_AUTHORITY:-polygon_ctf}
       PRIVY_APP_ID: ${PRIVY_APP_ID:-}
       WORKER_HEARTBEAT_FILE: /tmp/legwork-deposit-worker.heartbeat
       WORKER_HEARTBEAT_MAX_AGE_MS: 45000
+      WORKER_SUCCESS_MAX_AGE_MS: 180000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "npm", "run", "worker:health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+  reconciliation-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: legwork-reconciliation-worker
+    profiles: ["worker"]
+    restart: unless-stopped
+    command: ["npm", "run", "start:worker:reconciliation"]
+    environment:
+      <<: *production-config
+      NODE_ENV: production
+      ACCOUNTING_MODE: house_book_usdc
+      LEDGER_CURRENCY: USDC
+      DATABASE_URL: postgres://legwork:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/legwork
+      REDIS_URL: redis://redis:6379
+      SETTLEMENT_CHAIN_ID: ${SETTLEMENT_CHAIN_ID:-11155111}
+      TREASURY_SAFE_ADDRESS: ${TREASURY_SAFE_ADDRESS:-}
+      USDC_CONTRACT_ADDRESS: ${USDC_CONTRACT_ADDRESS:-0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238}
+      ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
+      PRIVY_APP_ID: ${PRIVY_APP_ID:-}
+      RECONCILIATION_POLL_INTERVAL_MS: ${RECONCILIATION_POLL_INTERVAL_MS:-60000}
+      WORKER_HEARTBEAT_FILE: /tmp/legwork-reconciliation-worker.heartbeat
+      WORKER_HEARTBEAT_MAX_AGE_MS: 45000
+      WORKER_SUCCESS_MAX_AGE_MS: 180000
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -224,9 +279,9 @@ services:
     environment:
       POSTGRES_DB: legwork
       POSTGRES_USER: legwork
-      POSTGRES_PASSWORD: legwork_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - legwork-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -240,7 +295,7 @@ services:
     container_name: legwork-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - legwork-redis-data:/data
     healthcheck:

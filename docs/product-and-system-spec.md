@@ -37,7 +37,9 @@ LEGWORK is not a Polymarket order router. A LEGWORK ticket does not create or cu
 
 The public catalog must maximize useful market coverage without showing markets that cannot support a trustworthy ticket.
 
-Public eligibility is recalculated on every read and index sweep. A market is hidden when it is ended, closed, archived, inactive, missing an enabled order book, no longer accepting orders, severely illiquid, or backed by stale source data. Date-based removal does not wait for a cleanup job: once `end_date <= now`, the market is no longer public.
+Discovery and quoteability are separate. The background sweep maintains searchable lifecycle, identity, grouping, volume, and liquidity metadata. Every visible API page refreshes its candidate token IDs from the CLOB before returning current prices, and checkout refreshes the selected legs again for the requested stake. Unknown lifecycle fields, missing CTF condition IDs, missing books, stale books, or insufficient executable depth fail closed for public quoteability.
+
+A market is hidden when it is ended, closed, archived, inactive, missing an enabled order book, no longer accepting orders, severely illiquid, or backed by stale source metadata. Date-based removal does not wait for a cleanup job: once `end_date <= now`, the market is no longer public.
 
 Historical market, outcome, rules, and identifier records are retained for tickets and audits. Hiding a market is not the same as deleting its settlement evidence.
 
@@ -73,7 +75,7 @@ The initial quote is a 15-second estimate, not a guaranteed reservation. The wal
 The user approves:
 
 - exact USDC amount;
-- stake and operation fee;
+- stake and a $0.50 operation fee per leg;
 - treasury, token, chain, and source wallet;
 - estimated payout; and
 - minimum acceptable payout based on a 50 basis point adverse-movement limit.
@@ -94,6 +96,8 @@ Settlement reads the full payout vector at a Polygon finalized block. Real-money
 
 A selected numerator of zero loses. A full selected numerator wins. A final 50/50, partial, unknown, or canceled result voids the whole LEGWORK ticket: stake is refunded and operation fees are retained. A disputed market remains pending until CTF is final.
 
+The staging quote policy starts at a 7% basket spread and has a published 12% maximum. Explainable soft relationships may add at most five percentage points. A hard-invalid or unpriceable relationship is unavailable instead of receiving a punitive quote.
+
 ## Ticket and Claim Lifecycle
 
 The user-visible lifecycle is:
@@ -108,7 +112,7 @@ The internal ledger is double-entry and denominated in USDC. Onchain transfers, 
 
 The treasury Safe is custody, not the ledger. Scheduled reconciliation must prove that onchain assets cover user balances, pending withdrawals, open stakes, and ticket reserves. An unexplained difference pauses new purchases and withdrawals until reviewed.
 
-Sepolia may use the existing 1-of-1 Safe under supervision. Ethereum mainnet requires a stronger multisig policy approved during the mainnet readiness review.
+Sepolia may use the existing 1-of-1 Safe under supervision. Its Safe, token, chain, and confirmation policy are static deployment configuration; runtime treasury rotation is disabled until operator identities and historical-scope migration are production-ready. Ethereum mainnet requires a stronger multisig policy approved during the mainnet readiness review.
 
 ## Operational Standard
 

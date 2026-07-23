@@ -2,7 +2,7 @@ import type { FeeModel, ParlayLeg } from "./types";
 
 export const DEFAULT_FEE_MODEL: FeeModel = {
   houseEdgeBps: 1_000,
-  operationFeePerLegUsd: 1
+  operationFeePerLegUsd: 0.5
 };
 
 export function clampProbability(value: number) {

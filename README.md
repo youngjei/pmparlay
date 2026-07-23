@@ -19,8 +19,7 @@ back to direct Polymarket Gamma reads for development only. Production builds fa
 `VITE_ALLOW_DIRECT_POLYMARKET_FALLBACK=true` is explicitly set.
 
 LEGWORK intentionally shows live source-linked markets only. It does not show demo or fabricated markets.
-With `DATABASE_URL` configured, the API serves markets from the persisted catalog. Run
-`npm run index:markets` before quoting against a fresh database.
+With `DATABASE_URL` configured, the API searches and pages the persisted discovery catalog, then refreshes the visible token IDs from CLOB before returning prices. Checkout refreshes the selected legs again for exact stake depth. Run `npm run index:markets` before quoting against a fresh database.
 
 ## Checks
 
@@ -47,16 +46,16 @@ npm run worker:settlements
 Run the API as a production-style container against local Postgres/Redis:
 
 ```bash
-docker compose --profile app build api migrate
-docker compose --profile app up -d api
+docker compose --profile app --profile worker build
+docker compose --profile app --profile worker up -d
 curl http://127.0.0.1:8787/readyz
 ```
 
 Stop only the app containers:
 
 ```bash
-docker compose --profile app stop api
-docker compose --profile app rm -f api migrate
+docker compose --profile app --profile worker stop
+docker compose --profile app --profile worker rm -f
 ```
 
 ## Current Scope
@@ -68,4 +67,6 @@ docker compose --profile app rm -f api migrate
 - Run deposit and settlement workers in local runtime with heartbeat checks.
 - Enforce launch exposure caps, quote expiry, payment reconciliation, ledger balancing, and ops controls.
 
-Before mainnet launch, finish the remaining external integration work: on-chain Polymarket settlement confirmation, production monitoring/alerts, and final legal/geo controls.
+The next target is supervised Sepolia staging. Direct-payment recovery, Gamma+CLOB settlement finality, reconciliation, Safe withdrawal, PostgreSQL concurrency, and lifecycle controls are implemented locally. The isolated staging database and zero-balance Safe reconcile exactly; remaining gates include deliberate opening house capital, supervised end-to-end payment and settlement drills, managed deployment infrastructure, external monitoring, and independent QA tracked in `docs/production-roadmap.md`. Ethereum mainnet remains disabled until its treasury, legal/geo, onchain-settlement, security, and operations review is approved.
+
+See [the supervised Sepolia staging operations runbook](docs/staging-operations.md) for startup, health, drill, incident, backup, and shutdown procedures.

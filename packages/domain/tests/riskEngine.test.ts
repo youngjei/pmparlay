@@ -33,7 +33,7 @@ describe("assessTicketRisk", () => {
     );
 
     expect(result.decision).toBe("accept");
-    expect(result.spreadBps).toBe(1_000);
+    expect(result.spreadBps).toBe(700);
     expect(result.checks).toContainEqual({
       level: "ok",
       label: "Risk checks passed",

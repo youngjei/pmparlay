@@ -287,7 +287,7 @@ button {
   cursor: pointer;
   font-size: 0.84rem;
   font-weight: 780;
-  min-height: 40px;
+  min-height: 44px;
   padding: 0 13px;
   white-space: nowrap;
 }
@@ -339,6 +339,18 @@ button {
 .market-list {
   display: grid;
   gap: 6px;
+}
+
+.sr-only {
+  border: 0;
+  clip: rect(0 0 0 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 .empty-market-state {
@@ -409,6 +421,186 @@ button {
 
 .market-card.chosen {
   background: #fbfff0;
+}
+
+.event-card {
+  background: #ffffff;
+  border: 1px solid #e0e5d4;
+  display: grid;
+  gap: 0;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.event-card:hover,
+.event-card.chosen {
+  border-color: #a8bf54;
+  box-shadow: inset 3px 0 0 var(--acid);
+}
+
+.event-card.chosen {
+  background: #fbfff0;
+}
+
+.event-header {
+  align-items: center;
+  display: grid;
+  gap: 11px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  min-height: 70px;
+  padding: 8px 10px;
+}
+
+.event-image {
+  background: #e2ebd5;
+}
+
+.event-main {
+  min-width: 0;
+}
+
+.event-main h2 {
+  color: #11140f;
+  font-size: 0.98rem;
+  font-weight: 840;
+  line-height: 1.22;
+  margin: 4px 0 0;
+}
+
+.event-footer-line {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.event-selected-summary {
+  color: #66735f;
+  font-size: 0.74rem;
+  font-weight: 820;
+  margin-top: 5px;
+}
+
+.event-selected-summary.active {
+  background: rgba(202, 255, 4, 0.28);
+  color: #192214;
+  padding: 3px 6px;
+}
+
+.event-toggle {
+  align-items: center;
+  background: #edf2e8;
+  color: #182016;
+  cursor: pointer;
+  display: inline-flex;
+  height: 38px;
+  justify-content: center;
+  width: 38px;
+}
+
+.event-toggle svg {
+  transition: transform 140ms ease;
+}
+
+.event-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.event-sibling-list {
+  border-top: 1px solid #e5eadb;
+  display: grid;
+  gap: 0;
+  padding: 0 10px 8px 13px;
+}
+
+.event-sibling-list[hidden] {
+  display: none;
+}
+
+.event-sibling-rows {
+  display: grid;
+}
+
+.event-sibling-row {
+  align-items: center;
+  background: transparent;
+  border-bottom: 1px solid #e5eadb;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 34px minmax(0, 1fr) minmax(164px, auto);
+  min-height: 58px;
+  padding: 7px 4px;
+}
+
+.event-sibling-row:hover,
+.event-sibling-row.chosen {
+  background: rgba(202, 255, 4, 0.08);
+  box-shadow: inset 3px 0 0 var(--acid);
+}
+
+.event-sibling-row .market-image {
+  height: 34px;
+  width: 34px;
+}
+
+.event-sibling-row h2 {
+  color: #11140f;
+  font-size: 0.9rem;
+  font-weight: 820;
+  line-height: 1.22;
+  margin: 4px 0 0;
+}
+
+.event-sibling-row .outcome-btn {
+  min-height: 42px;
+}
+
+.event-show-more,
+.load-more-markets {
+  background: #e7ecd9;
+  color: #26352f;
+  cursor: pointer;
+  font-weight: 860;
+  min-height: 40px;
+}
+
+.event-show-more {
+  justify-self: stretch;
+}
+
+.load-more-markets {
+  margin-top: 6px;
+  width: 100%;
+}
+
+.pagination-error {
+  align-items: center;
+  background: #fff4df;
+  border-left: 3px solid #d98b1d;
+  color: #5d421d;
+  display: flex;
+  font-size: 0.84rem;
+  gap: 12px;
+  justify-content: space-between;
+  line-height: 1.35;
+  padding: 10px 12px;
+}
+
+.pagination-error button {
+  background: #5d421d;
+  color: #ffffff;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-weight: 840;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.event-show-more:disabled,
+.load-more-markets:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .market-image {
@@ -529,7 +721,7 @@ button {
 }
 
 .outcome-btn.no strong {
-  color: var(--no);
+  color: #4f5b4a;
 }
 
 .outcome-btn.yes.selected {
@@ -542,12 +734,12 @@ button {
 }
 
 .outcome-btn.no.selected {
-  background: #311817;
-  color: #ffeceb;
+  background: #30362d;
+  color: #f4f7ef;
 }
 
 .outcome-btn.no.selected strong {
-  color: #ff8f8a;
+  color: #f4f7ef;
 }
 
 .outcome-btn.other.selected {
@@ -584,7 +776,11 @@ button {
 .ticket-pane {
   align-self: start;
   background: #f8faef;
+  max-height: calc(100vh - 86px);
+  overflow-y: auto;
   padding: 14px;
+  position: sticky;
+  top: 72px;
 }
 
 .ticket-header {
@@ -814,7 +1010,10 @@ button {
 .leg-list {
   display: grid;
   gap: 7px;
+  max-height: min(210px, 28vh);
   min-height: 76px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .empty-ticket {
@@ -898,6 +1097,14 @@ button {
   padding: 14px;
   position: relative;
   isolation: isolate;
+}
+
+.checkout-dock {
+  background: #f8faef;
+  bottom: 0;
+  padding-bottom: 8px;
+  position: sticky;
+  z-index: 4;
 }
 
 .payout-callout::before,
@@ -1057,6 +1264,11 @@ button {
   width: fit-content;
 }
 
+.payout-value.compact .firework-burst {
+  transform: scale(0.72);
+  transform-origin: center;
+}
+
 .mobile-payout-value {
   animation: payoutPulse 520ms cubic-bezier(0.16, 1, 0.3, 1);
   transform-origin: left center;
@@ -1121,10 +1333,22 @@ button {
   border-left-color: var(--no);
 }
 
-.risk-panel > div:first-child {
+.risk-panel summary {
   align-items: center;
+  cursor: pointer;
   display: flex;
   justify-content: space-between;
+  list-style: none;
+}
+
+.risk-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.risk-diagnostics {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .risk-panel span {
@@ -1227,6 +1451,21 @@ button {
   z-index: 1;
 }
 
+.payment-hero .payment-quote-update {
+  color: var(--acid);
+  font-weight: 780;
+  margin-top: 4px;
+}
+
+.selection-toast {
+  background: #11140f;
+  color: #f7ffe8;
+  font-size: 0.82rem;
+  font-weight: 760;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+}
+
 .payment-hero span,
 .payment-grid span,
 .payment-addresses span,
@@ -1273,6 +1512,27 @@ button {
   line-height: 1.25;
 }
 
+.payment-leg small {
+  color: #65705e;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.payment-leg a {
+  align-items: center;
+  color: #315f30;
+  display: inline-flex;
+  font-size: 0.78rem;
+  font-weight: 820;
+  gap: 5px;
+  justify-self: start;
+  text-decoration: none;
+}
+
+.payment-leg a:hover {
+  text-decoration: underline;
+}
+
 .payment-grid,
 .payment-addresses {
   display: grid;
@@ -1306,6 +1566,43 @@ button {
   font-weight: 820;
   padding: 9px 10px;
   text-decoration: none;
+}
+
+.payment-expiry {
+  align-items: center;
+  background: #fff7df;
+  color: #6e4d13;
+  display: flex;
+  font-size: 0.82rem;
+  gap: 7px;
+  padding: 9px 10px;
+}
+
+.payment-expiry.expired {
+  background: #fff0ef;
+  color: #8f302c;
+}
+
+.payment-technical {
+  border: 1px solid #dce4d2;
+  min-width: 0;
+}
+
+.payment-technical summary {
+  color: #46543e;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 840;
+  padding: 9px 10px;
+}
+
+.payment-technical[open] summary {
+  border-bottom: 1px solid #dce4d2;
+}
+
+.payment-technical .payment-addresses,
+.payment-technical .payment-tx-link {
+  margin: 8px;
 }
 
 .payment-note,
@@ -1592,6 +1889,17 @@ button {
   padding: 8px 10px;
 }
 
+.scoped-success {
+  background: #efffd4;
+  border-left: 3px solid #4f8f24;
+  color: #28501d;
+  font-size: 0.82rem;
+  font-weight: 780;
+  line-height: 1.34;
+  margin-bottom: 9px;
+  padding: 8px 10px;
+}
+
 .dashboard-grid {
   display: grid;
   gap: 8px;
@@ -1731,6 +2039,36 @@ button.account-row:hover {
   box-shadow: inset 3px 0 0 #f2b84b;
 }
 
+.claim-row {
+  background: #f1ffda;
+  box-shadow: inset 3px 0 0 #78b82e;
+}
+
+.claim-ticket-btn,
+.claim-action button {
+  align-items: center;
+  background: var(--acid);
+  border: 1px solid #8abe2f;
+  color: #11140f;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 900;
+  gap: 6px;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.claim-ticket-btn:disabled,
+.claim-action button:disabled {
+  background: #dce4cc;
+  border-color: #cad3bd;
+  color: #76816b;
+  cursor: wait;
+}
+
 .account-row strong,
 .account-row span {
   display: block;
@@ -1840,6 +2178,205 @@ button.account-row:hover {
   margin-top: 5px;
 }
 
+.claim-action {
+  align-items: center;
+  background: #f1ffda;
+  border: 1px solid #c8df9c;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding: 10px;
+}
+
+.claim-action > div {
+  min-width: 0;
+}
+
+.claim-action span,
+.claim-action strong {
+  display: block;
+}
+
+.claim-action small {
+  color: #52644a;
+  display: block;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  margin-top: 3px;
+}
+
+.claim-action span {
+  color: #5f6d58;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.claim-action strong {
+  color: #183713;
+  font-size: 1.08rem;
+  margin-top: 3px;
+}
+
+.withdrawal-request {
+  border-bottom: 1px solid #e0e5d4;
+  border-top: 1px solid #e0e5d4;
+  display: grid;
+  gap: 10px;
+  margin: 0 -13px 10px;
+  padding: 12px 13px;
+}
+
+.withdrawal-balance,
+.withdrawal-form-footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.withdrawal-balance span,
+.withdrawal-field > span,
+.withdrawal-destination > span {
+  color: #6b765f;
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 860;
+  text-transform: uppercase;
+}
+
+.withdrawal-balance strong {
+  color: #11140f;
+  display: block;
+  font-size: 1.18rem;
+  line-height: 1.1;
+  margin-top: 4px;
+}
+
+.withdrawal-balance button {
+  background: #edf3df;
+  color: #26331f;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 860;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.withdrawal-balance button:disabled,
+.withdrawal-submit:disabled {
+  background: #dce4cc;
+  color: #76816b;
+  cursor: not-allowed;
+}
+
+.withdrawal-field {
+  display: grid;
+  gap: 5px;
+}
+
+.withdrawal-input-wrap {
+  align-items: center;
+  border: 1px solid #bdc9ad;
+  display: flex;
+  min-height: 42px;
+  padding: 0 10px;
+}
+
+.withdrawal-input-wrap:focus-within {
+  border-color: #6d9630;
+  box-shadow: 0 0 0 2px rgba(156, 255, 0, 0.22);
+}
+
+.withdrawal-input-wrap input {
+  background: transparent;
+  border: 0;
+  color: #11140f;
+  min-width: 0;
+  outline: 0;
+  width: 100%;
+}
+
+.withdrawal-input-wrap input:disabled {
+  color: #76816b;
+}
+
+.withdrawal-input-wrap strong {
+  color: #52615a;
+  font-size: 0.78rem;
+  font-weight: 860;
+}
+
+.withdrawal-destination {
+  border-left: 2px solid #c8df9c;
+  min-width: 0;
+  padding-left: 9px;
+}
+
+.withdrawal-destination strong {
+  color: #26331f;
+  display: block;
+  font-size: 0.88rem;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.withdrawal-form-footer {
+  align-items: end;
+}
+
+.withdrawal-form-footer > span {
+  color: #5f6d58;
+  font-size: 0.76rem;
+  line-height: 1.32;
+  max-width: 290px;
+}
+
+.withdrawal-submit {
+  background: var(--acid);
+  color: #11140f;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  font-weight: 900;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.withdrawal-request-status {
+  margin-bottom: 0;
+}
+
+.withdrawal-row-actions {
+  align-items: stretch;
+  display: grid;
+  gap: 5px;
+}
+
+.withdrawal-cancel {
+  background: transparent;
+  border: 1px solid #cbd3c0;
+  color: #52615a;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 860;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.withdrawal-cancel:hover {
+  border-color: #8c9981;
+  color: #11140f;
+}
+
+.withdrawal-cancel:disabled {
+  color: #8c9687;
+  cursor: wait;
+}
+
 .ticket-progress-line {
   background: #11140f;
   color: #f8ffe9;
@@ -1880,6 +2417,23 @@ button.account-row:hover {
   text-decoration: underline;
 }
 
+.compact-tx-link {
+  align-items: center;
+  color: #315f30;
+  display: inline-flex !important;
+  font-size: 0.74rem !important;
+  font-weight: 840;
+  gap: 4px;
+  margin-top: 5px !important;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.compact-tx-link:hover {
+  text-decoration: underline;
+}
+
 .ticket-leg-stack {
   display: grid;
   gap: 7px;
@@ -1899,6 +2453,25 @@ button.account-row:hover {
 .ticket-leg-detail strong,
 .ticket-leg-detail a {
   display: block;
+}
+
+.settlement-diagnostics {
+  margin-top: 6px;
+}
+
+.settlement-diagnostics summary {
+  color: #5f6d58;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.settlement-diagnostics small {
+  color: #66736b;
+  display: block;
+  line-height: 1.35;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
 }
 
 .ticket-leg-detail span {
@@ -2051,9 +2624,42 @@ button.account-row:hover {
   display: none;
 }
 
+@media (min-width: 1041px) and (max-height: 760px) {
+  .ticket-pane {
+    padding-bottom: 126px;
+  }
+
+  .ticket-pane .leg-list {
+    max-height: 96px;
+  }
+
+  .ticket-pane .checkout-dock {
+    bottom: 14px;
+    box-shadow: 0 -10px 24px rgba(16, 18, 13, 0.18);
+    padding: 0;
+    position: fixed;
+    right: 14px;
+    width: min(400px, calc(100vw - 28px));
+  }
+
+  .ticket-pane .payout-callout {
+    min-height: 104px;
+    padding-right: 158px;
+  }
+
+  .ticket-pane .checkout-btn {
+    bottom: 8px;
+    margin: 0;
+    position: absolute;
+    right: 8px;
+    width: 142px;
+    z-index: 2;
+  }
+}
+
 @media (max-width: 1040px) {
   .app-shell {
-    padding: 10px;
+    padding: 10px 10px 82px;
   }
 
   .topbar,
@@ -2066,10 +2672,29 @@ button.account-row:hover {
     grid-template-columns: 1fr;
   }
 
-  .topbar,
   .pane-header {
     align-items: stretch;
     display: grid;
+  }
+
+  .topbar {
+    align-items: center;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topbar > div:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .top-nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .topbar-actions {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .topbar-brand,
@@ -2080,6 +2705,10 @@ button.account-row:hover {
 
   .quote-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .quote-strip.empty {
+    display: none;
   }
 
   .top-nav {
@@ -2100,6 +2729,154 @@ button.account-row:hover {
   }
 }
 
+@media (min-width: 721px) and (max-width: 1040px) {
+  .ticket-pane {
+    display: none;
+  }
+
+  .mobile-basket-bar {
+    align-items: center;
+    background: #11140f;
+    border-top: 1px solid rgba(202, 255, 4, 0.35);
+    bottom: 0;
+    color: #f8ffe9;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    left: 0;
+    min-height: 68px;
+    padding: 10px 18px;
+    position: fixed;
+    right: 0;
+    width: 100%;
+    z-index: 20;
+  }
+
+  .mobile-basket-bar span,
+  .mobile-basket-bar strong,
+  .mobile-sheet-handle span,
+  .mobile-sheet-handle strong {
+    display: block;
+  }
+
+  .mobile-basket-bar span,
+  .mobile-sheet-handle span {
+    color: #aebba0;
+    font-size: 0.78rem;
+    font-weight: 780;
+    text-transform: uppercase;
+  }
+
+  .mobile-basket-bar strong {
+    color: var(--acid);
+    margin-top: 2px;
+  }
+
+  .mobile-review {
+    align-items: center;
+    background: var(--acid);
+    color: #11140f;
+    display: inline-flex !important;
+    flex: 0 0 auto;
+    font-weight: 860;
+    justify-content: center;
+    min-height: 42px;
+    min-width: 94px;
+    padding: 0 16px;
+    text-transform: none !important;
+  }
+
+  .mobile-review:not(.ready) {
+    background: #2b3324;
+    color: #b8c5ae;
+  }
+
+  .mobile-basket-sheet {
+    background: #f8faef;
+    border-left: 1px solid rgba(202, 255, 4, 0.4);
+    box-shadow: -24px 0 70px rgba(0, 0, 0, 0.34);
+    bottom: 0;
+    color: #11140f;
+    display: flex;
+    flex-direction: column;
+    max-height: 100vh;
+    overflow: hidden;
+    padding: 12px 16px 16px;
+    position: fixed;
+    right: 0;
+    top: 0;
+    width: min(460px, 100%);
+    z-index: 30;
+  }
+
+  .mobile-sheet-backdrop {
+    background: rgba(0, 0, 0, 0.45);
+    inset: 0;
+    position: fixed;
+    z-index: 29;
+  }
+
+  .mobile-sheet-handle {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: space-between;
+    padding: 4px 0 10px;
+  }
+
+  .mobile-sheet-handle strong {
+    color: #11140f;
+    font-size: 1.12rem;
+    margin-top: 2px;
+  }
+
+  .mobile-sheet-handle button {
+    align-items: center;
+    background: #e6edda;
+    color: #11140f;
+    display: inline-flex;
+    height: 44px;
+    justify-content: center;
+    width: 44px;
+  }
+
+  .mobile-sheet-body {
+    align-content: start;
+    display: grid;
+    flex: 1 1 auto;
+    gap: 10px;
+    grid-auto-rows: max-content;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .mobile-stake {
+    margin: 0;
+  }
+
+  .mobile-leg-list {
+    display: grid;
+    gap: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .mobile-sheet-totals {
+    align-items: center;
+    background: var(--acid);
+    color: #11140f;
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+  }
+
+  .mobile-sheet-body > .checkout-btn {
+    align-self: start;
+    min-height: 46px;
+  }
+}
+
 @media (max-width: 720px) {
   .app-shell {
     padding-bottom: 78px;
@@ -2115,14 +2892,35 @@ button.account-row:hover {
     padding: 14px;
   }
 
+  .payment-actions {
+    background: #fbfcf7;
+    bottom: -14px;
+    padding: 4px 0 14px;
+    position: sticky;
+    z-index: 2;
+  }
+
   .payment-grid,
   .payment-addresses {
     grid-template-columns: 1fr;
   }
 
-  .market-card,
   .totals-grid {
     grid-template-columns: 1fr;
+  }
+
+  .market-card,
+  .event-header {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
+
+  .market-card > .outcome-grid {
+    grid-column: 1 / -1;
+  }
+
+  .topbar p,
+  .market-count {
+    display: none;
   }
 
   .quote-strip {
@@ -2133,8 +2931,31 @@ button.account-row:hover {
     padding: 12px;
   }
 
+  .account-hero {
+    margin-bottom: 8px;
+  }
+
+  .account-hero p {
+    display: none;
+  }
+
+  .dashboard-grid {
+    gap: 6px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .metric-card {
-    min-height: 104px;
+    min-height: 76px;
+    padding: 10px;
+  }
+
+  .metric-card strong {
+    font-size: 1.2rem;
+    margin-top: 5px;
+  }
+
+  .metric-card small {
+    display: none;
   }
 
   .account-row {
@@ -2156,6 +2977,29 @@ button.account-row:hover {
     width: fit-content;
   }
 
+  .claim-row .claim-ticket-btn,
+  .claim-action button {
+    width: 100%;
+  }
+
+  .claim-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .withdrawal-form-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .withdrawal-form-footer > span {
+    max-width: none;
+  }
+
+  .withdrawal-submit {
+    width: 100%;
+  }
+
   .ticket-pane {
     display: none;
   }
@@ -2165,9 +3009,50 @@ button.account-row:hover {
     gap: 9px;
   }
 
+  .event-header {
+    align-items: start;
+    gap: 9px;
+    position: relative;
+  }
+
   .market-image {
     height: 54px;
     width: 54px;
+  }
+
+  .event-toggle {
+    position: absolute;
+    right: 10px;
+    top: 8px;
+  }
+
+  .event-main {
+    padding-right: 42px;
+  }
+
+  .event-sibling-list {
+    padding: 0 6px 6px 9px;
+  }
+
+  .event-sibling-row {
+    align-items: start;
+    gap: 8px;
+    grid-template-columns: 44px minmax(0, 1fr);
+    padding: 8px 4px;
+  }
+
+  .event-sibling-row .market-image {
+    height: 44px;
+    width: 44px;
+  }
+
+  .event-sibling-row .outcome-grid {
+    grid-column: 1 / -1;
+  }
+
+  .pagination-error {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .outcome-grid {
@@ -2309,9 +3194,9 @@ button.account-row:hover {
     background: #e6edda;
     color: #11140f;
     display: inline-flex;
-    height: 38px;
+    height: 44px;
     justify-content: center;
-    width: 38px;
+    width: 44px;
   }
 
   .mobile-sheet-body {
@@ -2377,6 +3262,8 @@ button.account-row:hover {
   .mobile-payout-value,
   .outcome-btn,
   .market-card,
+  .event-card,
+  .event-toggle svg,
   .account-row.skeleton strong,
   .account-row.skeleton span,
   .account-row.skeleton em,

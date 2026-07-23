@@ -39,6 +39,9 @@ jobs:
       - name: Typecheck and build frontend
         run: npm run build
 
+      - name: Frontend bundle budgets
+        run: npm run qa:frontend-bundle
+
       - name: Typecheck API
         run: npm run typecheck:api
 
@@ -50,11 +53,26 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
+      - name: PostgreSQL integration tests
+        run: npm run test:postgres
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/legwork_test
+          DIRECT_PAY_MIGRATION_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/legwork_test
+
+      - name: Market database performance regression
+        run: npm run qa:market-performance:ci
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/legwork_test
+          MARKET_QA_MAX_DB_LATENCY_MS: 2500
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
       - name: E2E tests
         run: npm run test:e2e
+
+      - name: Wallet runtime E2E tests
+        run: npm run test:e2e:wallet
 
       - name: Dependency audit
         run: npm audit --audit-level=high

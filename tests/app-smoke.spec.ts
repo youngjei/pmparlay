@@ -788,7 +788,9 @@ test("claimable tickets load every page, use claimable amounts, and keep one ide
   expect(claimAttempts).toBe(1);
 
   await firstClaim.click();
-  await expect(page.getByRole("status")).toContainText("$12.34 moved to your available LEGWORK balance.");
+  await expect(
+    page.getByRole("status").filter({ hasText: "$12.34 moved to your available LEGWORK balance." })
+  ).toBeVisible();
   expect(claimAttempts).toBe(2);
   expect(claimKeys[0]).toMatch(/^ticket-claim-/);
   expect(claimKeys[1]).toBe(claimKeys[0]);
@@ -1264,7 +1266,9 @@ test("withdrawal requests validate exact USDC amounts, use the verified wallet, 
   await page.getByRole("button", { name: "Max" }).click();
   await expect(amountInput).toHaveValue("12.345678");
   await submit.click();
-  await expect(page.getByRole("status")).toContainText("Treasury processing is pending; funds have not been sent yet.");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Treasury processing is pending; funds have not been sent yet." })
+  ).toBeVisible();
   expect(withdrawalRequests[0]).toEqual({
     amountUsdc: "12.345678",
     destinationAddress: walletAddress,

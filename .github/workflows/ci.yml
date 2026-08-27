@@ -23,6 +23,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,7 +91,20 @@ jobs:
 
       - name: Smoke-test production container
         run: |
-          docker run -d --name legwork-ci-runtime -e PORT=8790 -p 8790:8790 legwork-ci
+          docker run -d --name legwork-ci-runtime --network host \
+            -e PORT=8790 \
+            -e ACCOUNTING_MODE=house_book_usdc \
+            -e LEDGER_CURRENCY=USDC \
+            -e DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/legwork_test \
+            -e REDIS_URL=redis://127.0.0.1:6379 \
+            -e RATE_LIMIT_BACKEND=redis \
+            -e RATE_LIMIT_SKIP_ON_REDIS_ERROR=false \
+            -e SETTLEMENT_AUTHORITY=polymarket_api \
+            -e TREASURY_SAFE_ADDRESS=0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B \
+            -e ETHEREUM_RPC_URL=http://127.0.0.1:8545 \
+            -e PRIVY_APP_ID=ci-smoke-test \
+            -e OPS_API_KEY=ci-smoke-test-key-with-at-least-32-bytes \
+            legwork-ci
           trap 'docker logs legwork-ci-runtime; docker rm -f legwork-ci-runtime' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:8790/healthz > /dev/null; then

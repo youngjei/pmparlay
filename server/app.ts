@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimitPlugin from "@fastify/rate-limit";
+import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyReply } from "fastify";
 import { z, ZodError } from "zod";
 import { constantTimeEqual, requireUserId, syncPrivyIdentityToken } from "./auth";
@@ -51,6 +53,8 @@ import { checkRedis } from "./redisHealth";
 import { hydrateOutcomesWithOrderBooks } from "../src/marketData";
 
 type AppDependencies = {
+  serveFrontend?: boolean;
+  frontendRoot?: string;
   getMarketCatalog?: typeof getMarketCatalog;
   getPersistedMarketCatalogPage?: typeof getPersistedMarketCatalogPage;
   getPersistedMarketOutcomesByIds?: typeof getPersistedMarketOutcomesByIds;
@@ -302,6 +306,7 @@ export function buildApp(dependencies: AppDependencies = {}) {
   const loadWorkerHeartbeatHealth = dependencies.getWorkerHeartbeatHealth || getWorkerHeartbeatHealth;
   const idempotencyEnabled = Boolean(config.DATABASE_URL && config.NODE_ENV !== "test") || Boolean(dependencies.reserveIdempotencyKey);
   const rateLimitStore = createRateLimitOptions();
+  const serveFrontend = dependencies.serveFrontend ?? config.NODE_ENV === "production";
   const app = Fastify({
     bodyLimit: 64 * 1024,
     logger: config.NODE_ENV === "test" ? false : { level: config.NODE_ENV === "production" ? "info" : "debug" }
@@ -312,9 +317,34 @@ export function buildApp(dependencies: AppDependencies = {}) {
     methods: ["GET", "POST", "OPTIONS"]
   });
   app.register(helmet, {
-    contentSecurityPolicy: false
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        connectSrc: ["'self'", "https:", "wss:"],
+        fontSrc: ["'self'", "data:", "https:"],
+        formAction: ["'self'", "https:"],
+        frameAncestors: ["'none'"],
+        frameSrc: ["'self'", "https:"],
+        imgSrc: ["'self'", "data:", "https:"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        workerSrc: ["'self'", "blob:"]
+      }
+    }
   });
   app.register(rateLimitPlugin, rateLimitStore.options);
+  if (serveFrontend) {
+    app.register(fastifyStatic, {
+      root: dependencies.frontendRoot || resolve(process.cwd(), "dist"),
+      index: false,
+      wildcard: false,
+      setHeaders(reply, filePath) {
+        reply.header("Cache-Control", filePath.includes("/assets/") ? "public, max-age=31536000, immutable" : "no-cache");
+      }
+    });
+  }
   app.addHook("onClose", async () => {
     if (rateLimitStore.redis) {
       await rateLimitStore.redis.quit();
@@ -1989,6 +2019,17 @@ export function buildApp(dependencies: AppDependencies = {}) {
       throw error;
     }
   });
+
+  if (serveFrontend) {
+    app.setNotFoundHandler((request, reply) => {
+      const acceptsHtml = request.headers.accept?.includes("text/html");
+      if (request.method === "GET" && acceptsHtml && !request.url.startsWith("/api/")) {
+        return reply.header("Cache-Control", "no-cache").type("text/html").sendFile("index.html");
+      }
+
+      return reply.status(404).send({ error: "not_found" });
+    });
+  }
 
   });
 

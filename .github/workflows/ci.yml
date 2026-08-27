@@ -78,7 +78,24 @@ jobs:
         run: npm audit --audit-level=high
 
       - name: Build API container
-        run: docker build -f Dockerfile.api .
+        run: docker build -t legwork-ci .
+
+      - name: Smoke-test production container
+        run: |
+          docker run -d --name legwork-ci-runtime -e PORT=8790 -p 8790:8790 legwork-ci
+          trap 'docker logs legwork-ci-runtime; docker rm -f legwork-ci-runtime' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8790/healthz > /dev/null; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8790/ > /dev/null
+          curl --fail --silent http://127.0.0.1:8790/favicon.svg > /dev/null
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8790/api/not-a-route)" = "404"
 
   secrets:
     runs-on: ubuntu-latest

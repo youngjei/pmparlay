@@ -1,4 +1,4 @@
-import { lazy, StrictMode, Suspense, useCallback, useMemo, useState } from "react";
+import { Component, lazy, StrictMode, Suspense, useCallback, useMemo, useState, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import type { WalletRuntimeAuth } from "./WalletRuntime";
@@ -19,6 +19,37 @@ const walletPaymentConfigSupported =
 const walletSessionHintKey = "legwork.wallet-session";
 
 const WalletRuntime = lazy(() => import("./WalletRuntime"));
+
+class WalletRuntimeBoundary extends Component<{ children: ReactNode; onError: () => void }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Wallet runtime failed to load", error, info);
+    this.props.onError();
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="wallet-runtime-alert" role="alert">
+          <div>
+            <strong>Wallet connection is temporarily unavailable</strong>
+            <span>Your basket is still here. Reload the wallet service to try again.</span>
+          </div>
+          <button onClick={() => window.location.reload()} type="button">
+            Reload
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 const initialWalletAuth: WalletRuntimeAuth = {
   authenticated: false,
@@ -55,6 +86,14 @@ function WalletEnabledApp() {
     setWalletAuth(nextAuth);
     setRuntimeReported(true);
   }, []);
+  const handleRuntimeError = useCallback(() => {
+    setWalletAuth({
+      ...initialWalletAuth,
+      walletSyncStatus: "error",
+      walletSyncError: "Wallet connection is temporarily unavailable."
+    });
+    setRuntimeReported(true);
+  }, []);
 
   const auth = useMemo(
     () => ({
@@ -70,15 +109,17 @@ function WalletEnabledApp() {
     <>
       <App auth={auth} />
       {runtimeRequested ? (
-        <Suspense fallback={null}>
-          <WalletRuntime
-            appId={privyAppId!}
-            walletConnectCloudProjectId={walletConnectCloudProjectId}
-            configuredUsdcContractAddress={configuredUsdcContractAddress}
-            connectIntent={connectIntent}
-            onAuthChange={handleAuthChange}
-          />
-        </Suspense>
+        <WalletRuntimeBoundary onError={handleRuntimeError}>
+          <Suspense fallback={<div className="wallet-runtime-loading" role="status">Opening wallet connection...</div>}>
+            <WalletRuntime
+              appId={privyAppId!}
+              walletConnectCloudProjectId={walletConnectCloudProjectId}
+              configuredUsdcContractAddress={configuredUsdcContractAddress}
+              connectIntent={connectIntent}
+              onAuthChange={handleAuthChange}
+            />
+          </Suspense>
+        </WalletRuntimeBoundary>
       ) : null}
     </>
   );

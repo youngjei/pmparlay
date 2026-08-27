@@ -65,7 +65,7 @@ For supervised Sepolia, Polygon RPC is intentionally deferred by product decisio
 - [x] Funded gitignored bot wallet available.
 - [ ] New opening house capital sent to the Safe and recorded from its transaction evidence.
 - [ ] Managed staging hosting, Postgres, Redis, secret storage, and monitoring architecture approved.
-- [ ] Previously shared Safe API key rotated before any deployment.
+- [ ] Previously shared Safe API key rotated before any mainnet or public production deployment (explicitly deferred during the supervised friends-and-family Sepolia beta).
 
 ## Deferred Beyond Sprint 4
 

@@ -249,14 +249,14 @@ async function mockPolymarket(page: Page) {
         createdAt: "2026-07-05T15:35:28.638Z",
         expiresAt: "2026-07-05T15:35:43.638Z",
         sourceAsOf: "2026-07-05T15:35:28.638Z",
-        stakeUsd: 25,
+        stakeUsd: 5,
         operationFeeUsd: 1,
-        totalCostUsd: 26,
+        totalCostUsd: 6,
         basketPrice: 0.125,
         basketProbability: 0.125,
         quoteSpread: 0.1,
         payoutMultiple: 7.2,
-        potentialPayoutUsd: 180,
+        potentialPayoutUsd: 36,
         riskDecision: "accept",
         riskChecks: [],
         legs: [
@@ -307,8 +307,8 @@ async function mockPolymarket(page: Page) {
         currency: "USDC",
         treasuryAddress: "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B",
         usdcContractAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-        amountMicroUnits: "26000000",
-        amountUsdc: 26,
+        amountMicroUnits: "6000000",
+        amountUsdc: 6,
         requiredConfirmations: 2,
         status: "pending",
         expiresAt: "2027-07-05T15:38:28.638Z"
@@ -396,8 +396,8 @@ test("market basket controls work", async ({ page }) => {
   const paymentDialog = page.getByRole("dialog", { name: "Buy this basket" });
   await expect(paymentDialog).toBeVisible();
   await expect(page.getByRole("button", { name: "Send USDC" })).toBeDisabled();
-  await expect(paymentDialog.locator(".payment-hero")).toContainText("$26.00");
-  for (const value of ["$180", "13¢", "10.0%", "7.20x", "$1.00"]) {
+  await expect(paymentDialog.locator(".payment-hero")).toContainText("$6.00");
+  for (const value of ["$36", "13¢", "10.0%", "7.20x", "$1.00"]) {
     await expect(paymentDialog.locator(".payment-grid")).toContainText(value);
   }
   for (const value of ["Up · 55¢", "Refreshed Bitcoin execution", "Up · 48¢", "Refreshed Ethereum execution"]) {
@@ -410,13 +410,17 @@ test("market basket controls work", async ({ page }) => {
   await secondMarket.getByRole("button", { name: /Down\s+51¢/ }).click();
   await expect(page.getByRole("button", { name: "Review basket" })).toBeEnabled();
 
+  await page.getByLabel("Buy amount").fill("0");
+  await page.getByLabel("Buy amount").blur();
+  await page.getByLabel("Add $2").click();
+  await expect(page.getByLabel("Buy amount")).toHaveValue("2");
   await page.getByLabel("Add $5").click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("25");
-  await page.getByLabel("Set max stake").click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("25");
+  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
+  await page.getByLabel("Add $1").click();
+  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
   await page.getByLabel("Buy amount").fill("999");
   await page.getByLabel("Buy amount").blur();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("25");
+  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
 
   await page.getByLabel("Search markets").fill("Argentina");
   await expect(page.locator(".market-card").first()).toContainText(/Argentina/i);
@@ -433,8 +437,8 @@ test("market basket controls work", async ({ page }) => {
 test("incomplete basket states never imply a payout or fee before buy amount", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
 
   await expect(page.locator(".payout-callout")).toContainText("Enter buy amount to see payout.");
   await expect(page.locator(".payout-callout .payout-value")).toHaveText("—");
@@ -452,8 +456,8 @@ test("failed quote preparation hides estimates and offers a real retry", async (
   await page.goto("/");
   await page.getByLabel("Set max stake").click();
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.getByRole("button", { name: "Review basket" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Buy this basket" });
@@ -471,9 +475,9 @@ test("mobile guidance progresses from zero picks through a priced basket", async
   await expect(basketBar).toContainText("Add two markets");
 
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await expect(basketBar).toContainText("Add one more");
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await expect(basketBar).toContainText("Enter buy amount");
   await basketBar.click();
   await page.getByLabel("Mobile buy amount").fill("5");
@@ -495,8 +499,8 @@ test("tablet and short desktop keep basket review controls in reach", async ({ p
 
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.getByLabel("Set max stake").click();
 
   const payoutBox = await page.locator(".payout-callout").boundingBox();
@@ -539,8 +543,8 @@ test("disconnected basket CTA opens wallet connection instead of becoming a dead
 
   await page.getByLabel("Set max stake").click();
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   const connect = page.locator(".ticket-pane").getByRole("button", { name: "Connect wallet" });
   await expect(connect).toBeEnabled();
   await connect.click();
@@ -561,14 +565,14 @@ test("outcome buttons preserve Polymarket label-price-id mapping", async ({ page
         createdAt: "2026-07-05T15:35:28.638Z",
         expiresAt: "2026-07-05T15:35:43.638Z",
         sourceAsOf: "2026-07-05T15:35:28.638Z",
-        stakeUsd: 25,
+        stakeUsd: 5,
         operationFeeUsd: 1,
-        totalCostUsd: 26,
+        totalCostUsd: 6,
         basketPrice: 0.125,
         basketProbability: 0.125,
         quoteSpread: 0.1,
         payoutMultiple: 7.2,
-        potentialPayoutUsd: 180,
+        potentialPayoutUsd: 36,
         riskDecision: "accept",
         riskChecks: [],
         legs: []
@@ -595,7 +599,7 @@ test("outcome buttons preserve Polymarket label-price-id mapping", async ({ page
 
   await page.getByRole("button", { name: "Review basket" }).click();
   expect(quoteBody).toEqual({
-    stakeUsd: 25,
+    stakeUsd: 5,
     legs: [{ id: "reverse-order-condition-Yes" }, { id: "newsom-nominee-condition-No" }]
   });
 });
@@ -687,7 +691,7 @@ test("large upside simple liquid basket is blocked by the closed beta payout cap
   await expect(page.getByText("Price check needed")).toHaveCount(0);
 });
 
-test("positive-upside favorite basket stays available across buy amounts", async ({ page }) => {
+test("positive-upside favorite basket stake controls clamp at the $5 launch cap", async ({ page }) => {
   await page.goto("/");
 
   await page.getByLabel("Search markets").fill("Gavin Newsom");
@@ -701,17 +705,13 @@ test("positive-upside favorite basket stays available across buy amounts", async
   await page.getByLabel("Search markets").fill("Argentina");
   await page.locator(".market-card").filter({ hasText: "Will Argentina win the next World Cup?" }).getByRole("button", { name: /No/ }).click();
 
-  await page.getByLabel("Buy amount").fill("5");
+  await page.getByLabel("Buy amount").fill("3");
   await page.getByLabel("Buy amount").blur();
-  await page.getByRole("button", { name: "Add $10", exact: true }).click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("15");
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeEnabled();
-  await expect(page.getByText("Unavailable")).toHaveCount(0);
+  await page.getByRole("button", { name: "Add $2", exact: true }).click();
+  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
 
-  await page.getByRole("button", { name: "Add $10", exact: true }).click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("25");
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeEnabled();
-  await expect(page.getByText("Unavailable")).toHaveCount(0);
+  await page.getByRole("button", { name: "Add $5", exact: true }).click();
+  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
 });
 
 test("claimable tickets load every page, use claimable amounts, and keep one idempotency key per retry", async ({ page }) => {
@@ -928,8 +928,8 @@ test("recoverable activation sends the payment modal to Portfolio without retry 
     currency: "USDC",
     treasuryAddress: "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B",
     usdcContractAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-    amountMicroUnits: "26000000",
-    amountUsdc: 26,
+    amountMicroUnits: "6000000",
+    amountUsdc: 6,
     requiredConfirmations: 2,
     expiresAt: "2027-07-05T15:38:28.638Z"
   };
@@ -983,8 +983,8 @@ test("recoverable activation sends the payment modal to Portfolio without retry 
   await page.getByLabel("Set max stake").click();
   await page.getByLabel("Search markets").fill("Up or Down");
   const markets = page.locator(".market-card");
-  await markets.nth(0).getByRole("button", { name: /Up/ }).click();
-  await markets.nth(1).getByRole("button", { name: /Up/ }).click();
+  await markets.nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await markets.nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.getByRole("button", { name: "Review basket" }).click();
   await page.getByRole("button", { name: "Send USDC" }).click();
 
@@ -1003,8 +1003,8 @@ test("successful activation ends with a clear live-basket completion state", asy
     currency: "USDC",
     treasuryAddress: "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B",
     usdcContractAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-    amountMicroUnits: "26000000",
-    amountUsdc: 26,
+    amountMicroUnits: "6000000",
+    amountUsdc: 6,
     requiredConfirmations: 2,
     expiresAt: "2027-07-05T15:38:28.638Z"
   };
@@ -1070,8 +1070,8 @@ test("successful activation ends with a clear live-basket completion state", asy
 
   await page.getByLabel("Set max stake").click();
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.getByRole("button", { name: "Review basket" }).click();
   await page.getByRole("button", { name: "Send USDC" }).click();
 
@@ -1096,8 +1096,8 @@ test("expired payment intent blocks wallet transfer and offers a fresh quote", a
         currency: "USDC",
         treasuryAddress: "0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B",
         usdcContractAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-        amountMicroUnits: "26000000",
-        amountUsdc: 26,
+        amountMicroUnits: "6000000",
+        amountUsdc: 6,
         requiredConfirmations: 2,
         status: "pending",
         expiresAt: new Date(Date.now() + 700).toISOString()
@@ -1141,8 +1141,8 @@ test("expired payment intent blocks wallet transfer and offers a fresh quote", a
 
   await page.getByLabel("Set max stake").click();
   await page.getByLabel("Search markets").fill("Up or Down");
-  await page.locator(".market-card").nth(0).getByRole("button", { name: /Up/ }).click();
-  await page.locator(".market-card").nth(1).getByRole("button", { name: /Up/ }).click();
+  await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+  await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.getByRole("button", { name: "Review basket" }).click();
   const send = page.getByRole("button", { name: "Send USDC" });
   await expect(send).toBeEnabled();

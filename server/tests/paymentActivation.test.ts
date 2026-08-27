@@ -5,6 +5,12 @@ import type { QuoteResponse } from "../quoteService";
 
 const userId = "00000000-0000-0000-0000-000000000001";
 const now = Date.parse("2026-07-13T12:00:00.000Z");
+const betaStakeUsd = 1;
+const betaPaymentAmountUsdc = 2;
+const betaPaymentAmountMicroUnits = "2000000";
+const betaPotentialPayoutUsd = 3.72;
+const betaPotentialPayoutMicroUsd = "3720000";
+const betaMinimumFinalPayoutMicroUsd = "3701400";
 
 function confirmedIntent(overrides: Partial<QuotePaymentIntent> = {}): QuotePaymentIntent {
   return {
@@ -15,8 +21,8 @@ function confirmedIntent(overrides: Partial<QuotePaymentIntent> = {}): QuotePaym
     currency: "USDC",
     treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
     usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    amountMicroUnits: "27000000",
-    amountUsdc: 27,
+    amountMicroUnits: betaPaymentAmountMicroUnits,
+    amountUsdc: betaPaymentAmountUsdc,
     requiredConfirmations: 12,
     status: "confirmed",
     txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -24,9 +30,9 @@ function confirmedIntent(overrides: Partial<QuotePaymentIntent> = {}): QuotePaym
     submissionDeadlineAt: "2026-07-13T12:03:00.000Z",
     trackingDeadlineAt: "2026-07-13T12:15:00.000Z",
     maxAdverseBps: 50,
-    estimatedPayoutMicroUsd: "90000000",
-    minFinalPayoutMicroUsd: "89550000",
-    amountReceivedMicroUnits: "27000000",
+    estimatedPayoutMicroUsd: betaPotentialPayoutMicroUsd,
+    minFinalPayoutMicroUsd: betaMinimumFinalPayoutMicroUsd,
+    amountReceivedMicroUnits: betaPaymentAmountMicroUnits,
     surplusMicroUnits: "0",
     confirmedAt: "2026-07-13T12:01:00.000Z",
     createdAt: "2026-07-13T12:00:00.000Z",
@@ -42,14 +48,14 @@ function originalQuote(): QuoteResponse {
     createdAt: "2026-07-13T12:00:00.000Z",
     expiresAt: "2026-07-13T12:00:15.000Z",
     sourceAsOf: "2026-07-13T11:59:59.000Z",
-    stakeUsd: 25,
-    operationFeeUsd: 2,
-    totalCostUsd: 27,
+    stakeUsd: betaStakeUsd,
+    operationFeeUsd: 1,
+    totalCostUsd: betaPaymentAmountUsdc,
     basketPrice: 0.25,
     basketProbability: 0.25,
     quoteSpread: 0.1,
     payoutMultiple: 3.6,
-    potentialPayoutUsd: 90,
+    potentialPayoutUsd: betaPotentialPayoutUsd,
     riskDecision: "accept",
     riskChecks: [{ level: "ok", label: "Risk checks passed", detail: "This basket is inside current launch limits." }],
     legs: [
@@ -94,8 +100,8 @@ function freshCatalog(price = 0.5) {
         liquidity: 1_000_000,
         orderbookTimestamp: "2026-07-13T12:00:00.000Z",
         askDepthEvidence: {
-          requestedNotionalUsd: 25,
-          availableNotionalUsd: 250,
+          requestedNotionalUsd: betaStakeUsd,
+          availableNotionalUsd: 5,
           bestAsk: price,
           executablePrice: price,
           vwapAsk: price,
@@ -118,8 +124,8 @@ function freshCatalog(price = 0.5) {
         liquidity: 1_000_000,
         orderbookTimestamp: "2026-07-13T12:00:00.000Z",
         askDepthEvidence: {
-          requestedNotionalUsd: 25,
-          availableNotionalUsd: 250,
+          requestedNotionalUsd: betaStakeUsd,
+          availableNotionalUsd: 5,
           bestAsk: price,
           executablePrice: price,
           vwapAsk: price,
@@ -167,15 +173,15 @@ describe("direct-pay activation requote", () => {
         ...outcome,
         bestAsk: 0.51,
         executablePrice: 0.51,
-        requestedNotionalUsd: 25,
-        availableAskNotionalUsd: 250,
+        requestedNotionalUsd: betaStakeUsd,
+        availableAskNotionalUsd: 5,
         priceSource: "clob_vwap" as const,
         sourceAsOf: "2026-07-13T12:00:01.000Z"
       }))
     }));
 
     const catalog = await getFreshRequoteCatalog(
-      { requestedNotionalUsdPerLeg: 25, outcomeIds },
+      { requestedNotionalUsdPerLeg: betaStakeUsd, outcomeIds },
       { getCandidates: getCandidates as never, hydrate: hydrate as never }
     );
 
@@ -186,7 +192,7 @@ describe("direct-pay activation requote", () => {
     expect(hydrate).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ id: "btc-up-yes" }), expect.objectContaining({ id: "eth-up-yes" })]),
       undefined,
-      expect.objectContaining({ requestedNotionalUsd: 25, requireExplicitLifecycle: true })
+      expect.objectContaining({ requestedNotionalUsd: betaStakeUsd, requireExplicitLifecycle: true })
     );
     expect(catalog.outcomes).toHaveLength(2);
     expect(catalog.outcomes.every((outcome) => outcome.priceSource === "clob_vwap")).toBe(true);
@@ -254,7 +260,7 @@ describe("direct-pay activation requote", () => {
       }
     );
 
-    expect(requestedNotional).toBe(25);
+    expect(requestedNotional).toBe(betaStakeUsd);
     expect(requestedOutcomeIds).toEqual(["btc-up-yes", "eth-up-yes"]);
     expect(gateChecked).toBe(true);
     expect(persistedFinalQuoteId).toBeDefined();
@@ -276,7 +282,7 @@ describe("direct-pay activation requote", () => {
           nowMs: now,
           getPaymentIntent: async () => confirmedIntent(),
           getOriginalQuote: async () => originalQuote(),
-          getRequoteCatalog: async () => freshCatalog(0.8),
+          getRequoteCatalog: async () => freshCatalog(0.6),
           exposureChecks: async () => [],
           markRecoverable: async (input) => {
             recoveryReason = input.reason;

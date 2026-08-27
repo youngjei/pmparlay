@@ -5,6 +5,12 @@ import { applyAdditionalRiskChecks, clearQuoteStore } from "../quoteService";
 
 type AppDependencies = Parameters<typeof buildRawApp>[0];
 
+const betaStakeUsd = 2;
+const betaOperationFeeUsd = 1;
+const betaAmountPaidUsd = betaStakeUsd + betaOperationFeeUsd;
+const betaPotentialPayoutUsd = 4;
+const betaPaymentAmountMicroUnits = "3000000";
+
 function buildApp(dependencies: AppDependencies = {}) {
   return buildRawApp({
     assertFinancialGateOpen: async () => ({
@@ -130,14 +136,14 @@ describe("LEGWORK API", () => {
       createdAt: "2026-07-05T15:35:28.638Z",
       expiresAt: "2026-07-05T15:35:43.638Z",
       sourceAsOf: "2026-07-05T15:35:28.638Z",
-      stakeUsd: 25,
-      operationFeeUsd: 1,
-      totalCostUsd: 26,
+      stakeUsd: betaStakeUsd,
+      operationFeeUsd: betaOperationFeeUsd,
+      totalCostUsd: betaAmountPaidUsd,
       basketPrice: 0.25,
       basketProbability: 0.25,
       quoteSpread: 0.1,
       payoutMultiple: 3.6,
-      potentialPayoutUsd: 90,
+      potentialPayoutUsd: betaPotentialPayoutUsd,
       riskDecision: "accept" as const,
       riskChecks: [],
       legs: []
@@ -167,14 +173,14 @@ describe("LEGWORK API", () => {
       createdAt: "2026-07-05T15:35:28.638Z",
       expiresAt: "2026-07-05T15:35:43.638Z",
       sourceAsOf: "2026-07-05T15:35:28.638Z",
-      stakeUsd: 25,
-      operationFeeUsd: 1,
-      totalCostUsd: 26,
+      stakeUsd: betaStakeUsd,
+      operationFeeUsd: betaOperationFeeUsd,
+      totalCostUsd: betaAmountPaidUsd,
       basketPrice: 0.25,
       basketProbability: 0.25,
       quoteSpread: 0.1,
       payoutMultiple: 3.6,
-      potentialPayoutUsd: 90,
+      potentialPayoutUsd: betaPotentialPayoutUsd,
       riskDecision: "accept" as const,
       riskChecks: [],
       legs: []
@@ -190,7 +196,7 @@ describe("LEGWORK API", () => {
 
     expect(warned.status).toBe("quoted");
     expect(warned.riskDecision).toBe("review");
-    expect(warned.potentialPayoutUsd).toBe(90);
+    expect(warned.potentialPayoutUsd).toBe(betaPotentialPayoutUsd);
   });
 
   it("reports health", async () => {
@@ -519,9 +525,9 @@ describe("LEGWORK API", () => {
           }
         ],
         openTickets: userId === "00000000-0000-0000-0000-000000000001" ? 2 : 0,
-        openStakeUsd: 50,
-        openPotentialPayoutUsd: 300,
-        openNetLiabilityUsd: 250
+        openStakeUsd: 4,
+        openPotentialPayoutUsd: 5,
+        openNetLiabilityUsd: 3
       })
     });
     openApps.push(app);
@@ -541,7 +547,7 @@ describe("LEGWORK API", () => {
         }
       ],
       openTickets: 2,
-      openNetLiabilityUsd: 250
+      openNetLiabilityUsd: 3
     });
   });
 
@@ -585,35 +591,41 @@ describe("LEGWORK API", () => {
   });
 
   it("fails closed when the financial gate blocks a withdrawal", async () => {
+    const previousAccountingMode = config.ACCOUNTING_MODE;
     let withdrawalCalled = false;
-    const app = buildApp({
-      assertFinancialGateOpen: async () => {
-        throw new Error("financial_gate_closed:reconciliation_snapshot_stale");
-      },
-      createWithdrawalRequest: async () => {
-        withdrawalCalled = true;
-        throw new Error("withdrawal_should_not_be_called");
-      }
-    });
-    openApps.push(app);
+    Object.assign(config, { ACCOUNTING_MODE: "house_book_usdc" });
+    try {
+      const app = buildApp({
+        assertFinancialGateOpen: async () => {
+          throw new Error("financial_gate_closed:reconciliation_snapshot_stale");
+        },
+        createWithdrawalRequest: async () => {
+          withdrawalCalled = true;
+          throw new Error("withdrawal_should_not_be_called");
+        }
+      });
+      openApps.push(app);
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/withdrawals",
-      headers: {
-        "idempotency-key": "withdrawal-gated-1"
-      },
-      payload: {
-        amountUsdc: "1",
-        destinationAddress: "0x1234567890abcdef1234567890abcdef12345678"
-      }
-    });
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/withdrawals",
+        headers: {
+          "idempotency-key": "withdrawal-gated-1"
+        },
+        payload: {
+          amountUsdc: "1",
+          destinationAddress: "0x1234567890abcdef1234567890abcdef12345678"
+        }
+      });
 
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({
-      error: "financial_operations_unavailable"
-    });
-    expect(withdrawalCalled).toBe(false);
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        error: "financial_operations_unavailable"
+      });
+      expect(withdrawalCalled).toBe(false);
+    } finally {
+      Object.assign(config, { ACCOUNTING_MODE: previousAccountingMode });
+    }
   });
 
   it("lists withdrawal requests for the authenticated user", async () => {
@@ -978,7 +990,7 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
@@ -988,7 +1000,7 @@ describe("LEGWORK API", () => {
     expect(response.json()).toMatchObject({
       status: "quoted",
       sourceAsOf: "2026-07-05T15:35:20.000Z",
-      stakeUsd: 25,
+      stakeUsd: betaStakeUsd,
       riskDecision: "accept",
       legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
     });
@@ -1041,13 +1053,13 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 7,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
 
     expect(response.statusCode).toBe(201);
-    expect(requestedNotionalUsd).toBe(7);
+    expect(requestedNotionalUsd).toBe(betaStakeUsd);
     expect(response.json()).toMatchObject({
       status: "quoted",
       sourceAsOf: "2026-07-05T15:35:34.000Z",
@@ -1111,7 +1123,7 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 7,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
@@ -1138,7 +1150,7 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "usa-no" }, { id: "morocco-yes" }]
       }
     });
@@ -1164,7 +1176,7 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "btc-up-no" }]
       }
     });
@@ -1190,7 +1202,7 @@ describe("LEGWORK API", () => {
       method: "POST",
       url: "/api/quotes",
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "missing" }]
       }
     });
@@ -1224,7 +1236,7 @@ describe("LEGWORK API", () => {
         "idempotency-key": "quote-replay-test"
       },
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
@@ -1252,7 +1264,7 @@ describe("LEGWORK API", () => {
         "idempotency-key": "quote-conflict-test"
       },
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
@@ -1276,7 +1288,7 @@ describe("LEGWORK API", () => {
         "idempotency-key": "bad key"
       },
       payload: {
-        stakeUsd: 25,
+        stakeUsd: betaStakeUsd,
         legs: [{ id: "btc-up-yes" }, { id: "newsom-no" }]
       }
     });
@@ -1348,8 +1360,8 @@ describe("LEGWORK API", () => {
           currency: "USDC",
           treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
           usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-          amountMicroUnits: "27000000",
-          amountUsdc: 27,
+          amountMicroUnits: betaPaymentAmountMicroUnits,
+          amountUsdc: betaAmountPaidUsd,
           requiredConfirmations: 12,
           status: "pending",
           expiresAt: "2026-07-06T06:20:00.000Z",
@@ -1370,35 +1382,41 @@ describe("LEGWORK API", () => {
     expect(response.json()).toMatchObject({
       id: "payment-intent-test",
       quoteId: "quote-test",
-      amountUsdc: 27,
+      amountUsdc: betaAmountPaidUsd,
       status: "pending"
     });
   });
 
   it("does not enter payment-intent persistence when the financial gate is closed", async () => {
+    const previousAccountingMode = config.ACCOUNTING_MODE;
     const createPaymentIntent = vi.fn();
     const loadTreasury = vi.fn();
-    const app = buildApp({
-      assertFinancialGateOpen: async () => {
-        throw new Error("financial_gate_closed:treasury_internal_delta");
-      },
-      getActiveTreasuryConfig: loadTreasury,
-      createQuotePaymentIntent: createPaymentIntent
-    });
-    openApps.push(app);
+    Object.assign(config, { ACCOUNTING_MODE: "house_book_usdc" });
+    try {
+      const app = buildApp({
+        assertFinancialGateOpen: async () => {
+          throw new Error("financial_gate_closed:treasury_internal_delta");
+        },
+        getActiveTreasuryConfig: loadTreasury,
+        createQuotePaymentIntent: createPaymentIntent
+      });
+      openApps.push(app);
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/quotes/quote-test/payment-intent"
-    });
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/quotes/quote-test/payment-intent"
+      });
 
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({
-      error: "financial_operations_unavailable",
-      detail: "financial_gate_closed:treasury_internal_delta"
-    });
-    expect(loadTreasury).not.toHaveBeenCalled();
-    expect(createPaymentIntent).not.toHaveBeenCalled();
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        error: "financial_operations_unavailable",
+        detail: "financial_gate_closed:treasury_internal_delta"
+      });
+      expect(loadTreasury).not.toHaveBeenCalled();
+      expect(createPaymentIntent).not.toHaveBeenCalled();
+    } finally {
+      Object.assign(config, { ACCOUNTING_MODE: previousAccountingMode });
+    }
   });
 
   it("submits payment transaction hashes for quote payment intents", async () => {
@@ -1418,8 +1436,8 @@ describe("LEGWORK API", () => {
           currency: "USDC",
           treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
           usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-          amountMicroUnits: "27000000",
-          amountUsdc: 27,
+          amountMicroUnits: betaPaymentAmountMicroUnits,
+          amountUsdc: betaAmountPaidUsd,
           requiredConfirmations: 12,
           status: "submitted",
           txHash,
@@ -1523,8 +1541,8 @@ describe("LEGWORK API", () => {
             status: "submitted",
             txHash,
             chainId: 11155111,
-            amountPaidUsd: 27,
-            potentialPayoutUsd: 100,
+            amountPaidUsd: betaAmountPaidUsd,
+            potentialPayoutUsd: betaPotentialPayoutUsd,
             legs: 2,
             createdAt: "2026-07-08T00:00:00.000Z",
             updatedAt: "2026-07-08T00:01:00.000Z"
@@ -1546,8 +1564,8 @@ describe("LEGWORK API", () => {
           id: "payment-intent-test",
           quoteId: "quote-test",
           status: "submitted",
-          amountPaidUsd: 27,
-          potentialPayoutUsd: 100,
+          amountPaidUsd: betaAmountPaidUsd,
+          potentialPayoutUsd: betaPotentialPayoutUsd,
           legs: 2
         }
       ]
@@ -1556,6 +1574,12 @@ describe("LEGWORK API", () => {
 
   it("keeps payment activation pending until the transfer is confirmed", async () => {
     const app = buildApp({
+      acceptQuote: async () => {
+        throw new Error("accept_should_not_be_called");
+      },
+      markQuotePaymentActivated: async () => {
+        throw new Error("mark_should_not_be_called");
+      },
       getQuotePaymentIntent: async () => ({
         id: "payment-intent-test",
         quoteId: "quote-test",
@@ -1564,8 +1588,8 @@ describe("LEGWORK API", () => {
         currency: "USDC",
         treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
         usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        amountMicroUnits: "27000000",
-        amountUsdc: 27,
+        amountMicroUnits: betaPaymentAmountMicroUnits,
+        amountUsdc: betaAmountPaidUsd,
         requiredConfirmations: 12,
         status: "submitted",
         txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1590,6 +1614,9 @@ describe("LEGWORK API", () => {
   it("returns recoverable payment intents as a conflict without retrying activation", async () => {
     let acceptCalled = false;
     const app = buildApp({
+      markQuotePaymentActivated: async () => {
+        throw new Error("mark_should_not_be_called");
+      },
       getQuotePaymentIntent: async () => ({
         id: "payment-intent-test",
         quoteId: "quote-test",
@@ -1598,8 +1625,8 @@ describe("LEGWORK API", () => {
         currency: "USDC",
         treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
         usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        amountMicroUnits: "27000000",
-        amountUsdc: 27,
+        amountMicroUnits: betaPaymentAmountMicroUnits,
+        amountUsdc: betaAmountPaidUsd,
         requiredConfirmations: 12,
         status: "recoverable",
         txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1644,8 +1671,8 @@ describe("LEGWORK API", () => {
         currency: "USDC",
         treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
         usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        amountMicroUnits: "27000000",
-        amountUsdc: 27,
+        amountMicroUnits: betaPaymentAmountMicroUnits,
+        amountUsdc: betaAmountPaidUsd,
         requiredConfirmations: 12,
         status: "confirmed",
         txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1683,8 +1710,8 @@ describe("LEGWORK API", () => {
           currency: "USDC",
           treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
           usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-          amountMicroUnits: "27000000",
-          amountUsdc: 27,
+          amountMicroUnits: betaPaymentAmountMicroUnits,
+          amountUsdc: betaAmountPaidUsd,
           requiredConfirmations: 12,
           status: "activated",
           ticketId: input.ticketId,
@@ -1721,8 +1748,8 @@ describe("LEGWORK API", () => {
         currency: "USDC",
         treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
         usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        amountMicroUnits: "27000000",
-        amountUsdc: 27,
+        amountMicroUnits: betaPaymentAmountMicroUnits,
+        amountUsdc: betaAmountPaidUsd,
         requiredConfirmations: 12,
         status: "confirmed",
         txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1762,8 +1789,8 @@ describe("LEGWORK API", () => {
         currency: "USDC",
         treasuryAddress: "0x1234567890abcdef1234567890abcdef12345678",
         usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        amountMicroUnits: "27000000",
-        amountUsdc: 27,
+        amountMicroUnits: betaPaymentAmountMicroUnits,
+        amountUsdc: betaAmountPaidUsd,
         requiredConfirmations: 12,
         status: "activated",
         txHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -1781,11 +1808,11 @@ describe("LEGWORK API", () => {
           status: "accepted",
           createdAt: "2026-07-06T06:02:00.000Z",
           updatedAt: "2026-07-06T06:02:00.000Z",
-          stakeUsd: 25,
-          operationFeeUsd: 1,
-          amountPaidUsd: 26,
-          potentialPayoutUsd: 100,
-          claimableAmountUsd: 100,
+          stakeUsd: betaStakeUsd,
+          operationFeeUsd: betaOperationFeeUsd,
+          amountPaidUsd: betaAmountPaidUsd,
+          potentialPayoutUsd: betaPotentialPayoutUsd,
+          claimableAmountUsd: betaPotentialPayoutUsd,
           accountingMode: "house_book_usdc",
           currency: "USDC",
           legs: []
@@ -1852,11 +1879,11 @@ describe("LEGWORK API", () => {
           status: "accepted",
           createdAt: "2026-07-05T15:35:28.638Z",
           updatedAt: "2026-07-05T15:35:28.638Z",
-          stakeUsd: 25,
-          operationFeeUsd: 1,
-          amountPaidUsd: 26,
-          potentialPayoutUsd: 100,
-          claimableAmountUsd: 100,
+          stakeUsd: betaStakeUsd,
+          operationFeeUsd: betaOperationFeeUsd,
+          amountPaidUsd: betaAmountPaidUsd,
+          potentialPayoutUsd: betaPotentialPayoutUsd,
+          claimableAmountUsd: betaPotentialPayoutUsd,
           accountingMode: "house_book_usdc",
           currency: "USDC",
           legs: 2,
@@ -1884,9 +1911,9 @@ describe("LEGWORK API", () => {
           ticketId: "ticket-test",
           quoteId: "quote-test",
           status: "accepted",
-          stakeUsd: 25,
-          amountPaidUsd: 26,
-          potentialPayoutUsd: 100,
+          stakeUsd: betaStakeUsd,
+          amountPaidUsd: betaAmountPaidUsd,
+          potentialPayoutUsd: betaPotentialPayoutUsd,
           legs: 2,
           legStatusCounts: {
             pending: 2
@@ -1911,11 +1938,11 @@ describe("LEGWORK API", () => {
               status: "claimable",
               createdAt: "2026-07-05T15:35:28.638Z",
               updatedAt: "2026-07-05T15:36:28.638Z",
-              stakeUsd: 25,
-              operationFeeUsd: 1,
-              amountPaidUsd: 26,
-              potentialPayoutUsd: 100,
-              claimableAmountUsd: 100,
+              stakeUsd: betaStakeUsd,
+              operationFeeUsd: betaOperationFeeUsd,
+              amountPaidUsd: betaAmountPaidUsd,
+              potentialPayoutUsd: betaPotentialPayoutUsd,
+              claimableAmountUsd: betaPotentialPayoutUsd,
               accountingMode: "house_book_usdc",
               currency: "USDC",
               legs: 2,
@@ -1941,7 +1968,7 @@ describe("LEGWORK API", () => {
     expect(receivedUserId).toBe("00000000-0000-0000-0000-000000000001");
     expect(receivedQuery).toEqual({ cursor: undefined, limit: 24 });
     expect(response.json()).toMatchObject({
-      tickets: [{ status: "claimable", claimableAmountUsd: 100 }],
+      tickets: [{ status: "claimable", claimableAmountUsd: betaPotentialPayoutUsd }],
       pageInfo: { limit: 24, hasMore: true }
     });
   });
@@ -1974,11 +2001,11 @@ describe("LEGWORK API", () => {
         status: "live",
         createdAt: "2026-07-05T15:35:28.638Z",
         updatedAt: "2026-07-05T15:36:28.638Z",
-        stakeUsd: 25,
-        operationFeeUsd: 1,
-        amountPaidUsd: 26,
-        potentialPayoutUsd: 100,
-        claimableAmountUsd: 100,
+        stakeUsd: betaStakeUsd,
+        operationFeeUsd: betaOperationFeeUsd,
+        amountPaidUsd: betaAmountPaidUsd,
+        potentialPayoutUsd: betaPotentialPayoutUsd,
+        claimableAmountUsd: betaPotentialPayoutUsd,
         accountingMode: "house_book_usdc",
         currency: "USDC",
         purchaseTxHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -2005,7 +2032,7 @@ describe("LEGWORK API", () => {
     expect(response.json()).toMatchObject({
       ticketId: "ticket-test",
       status: "live",
-      amountPaidUsd: 26,
+      amountPaidUsd: betaAmountPaidUsd,
       purchaseTxHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
       purchaseChainId: 11155111,
       legs: [
@@ -2047,7 +2074,7 @@ describe("LEGWORK API", () => {
           userId: input.userId,
           status: "claimed",
           ticketStatus: "paid",
-          amountMicroUnits: "100000000",
+          amountMicroUnits: "4000000",
           currency: "USDC",
           ledgerTransactionId: "11111111-1111-4111-8111-111111111111",
           idempotencyKey: input.idempotencyKey
@@ -2070,7 +2097,7 @@ describe("LEGWORK API", () => {
       ticketId: "ticket-test",
       status: "claimed",
       ticketStatus: "paid",
-      amountMicroUnits: "100000000",
+      amountMicroUnits: "4000000",
       currency: "USDC"
     });
   });
@@ -2083,7 +2110,7 @@ describe("LEGWORK API", () => {
       userId: input.userId,
       status: "already_claimed" as const,
       ticketStatus: "paid" as const,
-      amountMicroUnits: "100000000",
+      amountMicroUnits: "4000000",
       currency: "USDC",
       ledgerTransactionId: "11111111-1111-4111-8111-111111111111",
       idempotencyKey: input.idempotencyKey

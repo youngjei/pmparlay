@@ -17,7 +17,7 @@ LEGWORK is not a Polymarket order router. A LEGWORK ticket does not create or cu
 - Settlement reads Polymarket outcomes from Polygon mainnet because that is where the source markets resolve.
 - The next real-money launch is an invite-only Ethereum mainnet beta.
 - No automatic hedging is part of the initial launch.
-- Initial limits are $25 maximum stake, $250 maximum gross payout, $500 maximum exposure per user, and $1,000 maximum exposure per event.
+- Supervised beta limits are $5 maximum stake, $50 maximum gross payout, $100 maximum exposure per user, and $250 maximum exposure per market or event.
 
 ## Primary User Journey
 

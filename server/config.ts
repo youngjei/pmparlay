@@ -1,7 +1,11 @@
-import "dotenv/config";
 import { createHash } from "node:crypto";
+import { config as loadDotenv } from "dotenv";
 import { getAddress, zeroAddress } from "viem";
 import { z } from "zod";
+
+if (!process.env.VITEST) {
+  loadDotenv();
+}
 
 export const SEPOLIA_PAYMENT_CHAIN_ID = 11155111;
 export const CIRCLE_SEPOLIA_USDC_CONTRACT_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
@@ -44,9 +48,9 @@ const envSchema = z.object({
   ACCOUNTING_MODE: z.enum(["play_money", "house_book_usdc"]).default("play_money"),
   LEDGER_CURRENCY: z.enum(["USD", "USDC"]).default("USD"),
   SETTLEMENT_CHAIN_ID: z.coerce.number().int().positive().default(SEPOLIA_PAYMENT_CHAIN_ID),
-  MAX_USER_LIABILITY_USD: z.coerce.number().positive().default(500),
-  MAX_MARKET_LIABILITY_USD: z.coerce.number().positive().default(1_000),
-  MAX_EVENT_LIABILITY_USD: z.coerce.number().positive().default(1_000),
+  MAX_USER_LIABILITY_USD: z.coerce.number().positive().default(100),
+  MAX_MARKET_LIABILITY_USD: z.coerce.number().positive().default(250),
+  MAX_EVENT_LIABILITY_USD: z.coerce.number().positive().default(250),
   SETTLEMENT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   SETTLEMENT_BATCH_SIZE: z.coerce.number().int().positive().max(250).default(25),
   SETTLEMENT_BLOCKED_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(5),
@@ -95,7 +99,10 @@ const envSchema = z.object({
 });
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
-  const parsed = envSchema.parse(environment);
+  const parsed = envSchema.parse({
+    ...environment,
+    API_PORT: environment.API_PORT || environment.PORT
+  });
   const settlementAuthority: SettlementAuthority =
     parsed.SETTLEMENT_AUTHORITY ||
     (parsed.SETTLEMENT_REQUIRE_ONCHAIN === false ? "polymarket_api" : "polygon_ctf");

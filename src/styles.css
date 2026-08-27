@@ -37,6 +37,15 @@ button {
   border: 0;
 }
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--acid);
+  outline-offset: 2px;
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 14px;
@@ -60,12 +69,19 @@ button {
 
 .brand-lockup {
   align-items: center;
+  background: transparent;
   color: var(--acid);
+  cursor: pointer;
   display: flex;
   font-size: 1.26rem;
   font-weight: 920;
   gap: 10px;
   letter-spacing: 0;
+  padding: 0;
+}
+
+.brand-lockup:hover span {
+  color: #f8ffe9;
 }
 
 .topbar p {
@@ -272,6 +288,81 @@ button {
   min-width: 0;
   outline: 0;
   width: 100%;
+}
+
+.search-box:focus-within,
+.sort-control:focus-within {
+  border-color: #7ca300;
+  box-shadow: 0 0 0 2px rgba(202, 255, 4, 0.38);
+}
+
+.site-footer {
+  align-items: center;
+  color: #aeb9a1;
+  display: flex;
+  font-size: 0.74rem;
+  gap: 16px;
+  justify-content: center;
+  min-height: 46px;
+  padding: 14px 8px 2px;
+}
+
+.site-footer a {
+  align-items: center;
+  color: var(--acid);
+  display: inline-flex;
+  gap: 5px;
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  text-decoration: underline;
+}
+
+.wallet-runtime-loading,
+.wallet-runtime-alert {
+  background: #151912;
+  border: 1px solid rgba(202, 255, 4, 0.5);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  color: #f8ffe9;
+  position: fixed;
+  right: 20px;
+  top: 92px;
+  z-index: 80;
+}
+
+.wallet-runtime-loading {
+  font-size: 0.82rem;
+  padding: 12px 14px;
+}
+
+.wallet-runtime-alert {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  max-width: min(420px, calc(100vw - 28px));
+  padding: 12px;
+}
+
+.wallet-runtime-alert strong,
+.wallet-runtime-alert span {
+  display: block;
+}
+
+.wallet-runtime-alert span {
+  color: #b9c5ae;
+  font-size: 0.78rem;
+  margin-top: 3px;
+}
+
+.wallet-runtime-alert button {
+  background: var(--acid);
+  color: #11140f;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-weight: 850;
+  min-height: 38px;
+  padding: 0 14px;
 }
 
 .category-rail {
@@ -2880,6 +2971,19 @@ button.account-row:hover {
 @media (max-width: 720px) {
   .app-shell {
     padding-bottom: 78px;
+  }
+
+  .site-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .wallet-runtime-loading,
+  .wallet-runtime-alert {
+    left: 14px;
+    right: 14px;
+    top: 76px;
   }
 
   .payment-modal-backdrop {

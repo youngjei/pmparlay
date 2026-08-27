@@ -43,14 +43,14 @@ export type RiskPolicy = {
 export const DEFAULT_RISK_POLICY: RiskPolicy = {
   baseSpreadBps: 700,
   operationFeePerLegUsd: 0.5,
-  maxStakeUsd: 25,
+  maxStakeUsd: 5,
   maxLegs: 8,
-  maxGrossPayoutUsd: 250,
+  maxGrossPayoutUsd: 50,
   maxPayoutMultiple: 250,
   minVolumeUsd: 50_000,
   minLiquidityUsd: 10_000,
   maxSameCorrelationGroupLegs: 4,
-  manualReviewStakeUsd: 25,
+  manualReviewStakeUsd: 5,
   manualReviewLegs: 5,
   manualReviewPayoutShare: 0.8,
   maxSpreadBps: 1_200

@@ -17,8 +17,6 @@ describe("USDC deposit scanner worker", () => {
 
   it("fails closed before scanning when the RPC chain differs from settlement", async () => {
     let getCurrentBlockCalled = false;
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ result: "0x1" }))));
-
     await expect(
       processUsdcDepositScan({
         treasuryConfig: {
@@ -27,6 +25,7 @@ describe("USDC deposit scanner worker", () => {
           usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
           requiredConfirmations: config.USDC_REQUIRED_CONFIRMATIONS
         },
+        getChainId: async () => "0x1",
         getCurrentBlock: async () => {
           getCurrentBlockCalled = true;
           return 120n;
@@ -37,8 +36,6 @@ describe("USDC deposit scanner worker", () => {
   });
 
   it("fails closed before scanning when the RPC chain is unavailable", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("unavailable"))));
-
     await expect(
       processUsdcDepositScan({
         treasuryConfig: {
@@ -46,6 +43,9 @@ describe("USDC deposit scanner worker", () => {
           treasuryAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
           usdcContractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
           requiredConfirmations: config.USDC_REQUIRED_CONFIRMATIONS
+        },
+        getChainId: async () => {
+          throw new Error("ethereum_rpc_request_failed");
         },
         getCurrentBlock: async () => 120n
       })

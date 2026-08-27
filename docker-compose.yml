@@ -16,7 +16,7 @@ services:
   migrate:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-migrate
     profiles: ["app", "worker"]
     command: ["sh", "-c", "npm run db:migrate && npm run db:backfill-settlement-identities"]
@@ -41,7 +41,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-api
     profiles: ["app"]
     restart: unless-stopped
@@ -82,7 +82,7 @@ services:
   market-worker:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-market-worker
     profiles: ["worker"]
     restart: unless-stopped
@@ -124,7 +124,7 @@ services:
   outbox-worker:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-outbox-worker
     profiles: ["worker"]
     restart: unless-stopped
@@ -161,7 +161,7 @@ services:
   settlement-worker:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-settlement-worker
     profiles: ["worker"]
     restart: unless-stopped
@@ -198,7 +198,7 @@ services:
   deposit-worker:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-deposit-worker
     profiles: ["worker"]
     restart: unless-stopped
@@ -239,7 +239,7 @@ services:
   reconciliation-worker:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: legwork-reconciliation-worker
     profiles: ["worker"]
     restart: unless-stopped

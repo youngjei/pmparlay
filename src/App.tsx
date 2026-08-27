@@ -34,8 +34,8 @@ const categoryOrder = [
   "World and Weather",
   "Other"
 ] as const;
-const stakeCapUsd = 25;
-const stakeAdds = [1, 5, 10];
+const stakeCapUsd = 5;
+const stakeAdds = [1, 2, 5];
 const marketPageSize = 48;
 const claimableTicketPageSize = 50;
 const maxClaimableTicketPages = 200;
@@ -880,7 +880,7 @@ function eventSiblingListId(eventKey: string) {
 }
 
 export default function App({ auth }: AppProps = {}) {
-  const [activeView, setActiveView] = useState<AppView>("markets");
+  const [activeView, setActiveView] = useState<AppView>(() => (window.location.hash === "#portfolio" ? "portfolio" : "markets"));
   const [marketCatalog, setMarketCatalog] = useState<MarketCatalog | null>(null);
   const [outcomes, setOutcomes] = useState<MarketOutcome[]>([]);
   const [fetchState, setFetchState] = useState<FetchState>("idle");
@@ -970,6 +970,20 @@ export default function App({ auth }: AppProps = {}) {
   const paymentReviewCanClose = paymentState !== "sending" && paymentState !== "activating";
   paymentReviewCanCloseRef.current = paymentReviewCanClose;
   const authIdentity = auth?.enabled ? (auth.authenticated ? auth.userLabel || "connected-wallet" : "signed-out") : "local-session";
+
+  const navigateToView = useCallback((view: AppView) => {
+    setActiveView(view);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.hash = view === "portfolio" ? "portfolio" : "";
+    window.history.pushState({ view }, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    const syncViewFromLocation = () => setActiveView(window.location.hash === "#portfolio" ? "portfolio" : "markets");
+    window.addEventListener("popstate", syncViewFromLocation);
+    return () => window.removeEventListener("popstate", syncViewFromLocation);
+  }, []);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(query), 260);
@@ -1866,7 +1880,7 @@ export default function App({ auth }: AppProps = {}) {
         setBurstKey((key) => key + 1);
         setSelectedTicketId(payload.ticketId);
         setAccountRefreshKey((key) => key + 1);
-        setActiveView("portfolio");
+        navigateToView("portfolio");
         return;
       }
       if (isRecoverablePaymentResponse(payload)) {
@@ -2022,7 +2036,7 @@ export default function App({ auth }: AppProps = {}) {
 
   function openPortfolioFromPayment() {
     closePaymentReview();
-    setActiveView("portfolio");
+    navigateToView("portfolio");
     setAccountRefreshKey((key) => key + 1);
   }
 
@@ -2279,7 +2293,7 @@ export default function App({ auth }: AppProps = {}) {
               <i className="payment-spinner" aria-hidden="true" />
             </div>
           ) : paymentError ? (
-            <div className="payment-error">{paymentError}</div>
+            <div className="payment-error" role="alert">{paymentError}</div>
           ) : null}
 
           <div className="payment-actions">
@@ -2676,7 +2690,7 @@ export default function App({ auth }: AppProps = {}) {
         </div>
 
         {accountState === "error" ? (
-          <div className="inline-error">
+          <div className="inline-error" role="alert">
             <span>{accountError}</span>
             <button onClick={() => setAccountRefreshKey((key) => key + 1)} type="button">Retry</button>
           </div>
@@ -2776,7 +2790,7 @@ export default function App({ auth }: AppProps = {}) {
               <div className="panel-empty">
                 <ShoppingCart size={22} />
                 <span>No active baskets yet.</span>
-                <button onClick={() => setActiveView("markets")} type="button">Browse markets</button>
+                <button onClick={() => navigateToView("markets")} type="button">Browse markets</button>
               </div>
             )}
           </section>
@@ -3003,7 +3017,13 @@ export default function App({ auth }: AppProps = {}) {
           </div>
           <h2>{row.question}</h2>
           {row.marketUrl ? (
-            <a href={row.marketUrl} target="_blank" rel="noreferrer" className="market-source-link">
+            <a
+              href={row.marketUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="market-source-link"
+              aria-label={`${sourceLabel(row.source, row.marketUrl)}: ${row.question}`}
+            >
               {sourceLabel(row.source, row.marketUrl)}
               <ExternalLink size={13} />
             </a>
@@ -3020,6 +3040,8 @@ export default function App({ auth }: AppProps = {}) {
                 onClick={() => chooseOutcome(outcome)}
                 key={outcome.id}
                 aria-pressed={isSelected}
+                aria-label={`${outcome.outcome} ${formatCents(outcome.price)} for ${row.question}`}
+                type="button"
               >
                 <span>{outcome.outcome}</span>
                 <strong>{formatCents(outcome.price)}</strong>
@@ -3140,11 +3162,11 @@ export default function App({ auth }: AppProps = {}) {
         inert={mobileBasketOpen || paymentModalOpen ? true : undefined}
       >
       <header className="topbar">
-        <div>
-          <div className="brand-lockup">
+        <div className="topbar-brand">
+          <button className="brand-lockup" onClick={() => navigateToView("markets")} aria-label="LEGWORK Markets" type="button">
             <Layers3 size={18} />
             <span>LEGWORK</span>
-          </div>
+          </button>
           <p>Why win once when you can win big?</p>
         </div>
         <nav className="top-nav" aria-label="Primary">
@@ -3152,7 +3174,8 @@ export default function App({ auth }: AppProps = {}) {
             <button
               className={activeView === view ? "top-nav-btn active" : "top-nav-btn"}
               key={view}
-              onClick={() => setActiveView(view)}
+              onClick={() => navigateToView(view)}
+              aria-current={activeView === view ? "page" : undefined}
               type="button"
             >
               {view === "markets" ? "Markets" : "Portfolio"}
@@ -3269,7 +3292,11 @@ export default function App({ auth }: AppProps = {}) {
           <div className="market-list">
             {marketEventSurfaces.map((surface) => renderEventSurface(surface))}
             {marketEventSurfaces.length === 0 ? (
-              <div className="empty-market-state">
+              <div
+                className="empty-market-state"
+                role={fetchState === "error" ? "alert" : "status"}
+                aria-live={fetchState === "error" ? "assertive" : "polite"}
+              >
                 {fetchState === "loading" || fetchState === "idle" ? (
                   <div className="market-loading-orbit" aria-hidden="true" />
                 ) : null}
@@ -3479,11 +3506,11 @@ export default function App({ auth }: AppProps = {}) {
                     Live quote confirmed · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
                   </small>
                 ) : null}
-                {serverQuoteState === "error" ? <small className="server-quote-status error">{serverQuoteError}</small> : null}
+                {serverQuoteState === "error" ? <small className="server-quote-status error" role="alert">{serverQuoteError}</small> : null}
                 {serverTicketState === "ready" && serverTicket ? (
                   <small className="server-quote-status">Ticket live · {serverTicket.ticketId.slice(0, 8)}</small>
                 ) : null}
-                {serverTicketState === "error" ? <small className="server-quote-status error">{serverTicketError}</small> : null}
+                {serverTicketState === "error" ? <small className="server-quote-status error" role="alert">{serverTicketError}</small> : null}
                 <div className="risk-check-list">
                   {visibleRiskChecks.map((check) => (
                     <span className={check.level} key={`${check.label}-${check.detail}`}>
@@ -3567,6 +3594,13 @@ export default function App({ auth }: AppProps = {}) {
       ) : (
         renderPortfolio()
       )}
+      <footer className="site-footer">
+        <span>&copy; {new Date().getFullYear()} LEGWORK</span>
+        <span>Supervised Sepolia beta · Test USDC only</span>
+        <a href="https://polymarket.com" target="_blank" rel="noreferrer">
+          Market data by Polymarket <ExternalLink size={12} />
+        </a>
+      </footer>
       </div>
 
       {activeView === "markets" && mobileBasketOpen ? (
@@ -3669,11 +3703,11 @@ export default function App({ auth }: AppProps = {}) {
                   Live quote confirmed · expires {new Date(activeServerQuote.expiresAt).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
                 </small>
               ) : null}
-              {serverQuoteState === "error" ? <small className="server-quote-status error mobile-status">{serverQuoteError}</small> : null}
+              {serverQuoteState === "error" ? <small className="server-quote-status error mobile-status" role="alert">{serverQuoteError}</small> : null}
               {serverTicketState === "ready" && serverTicket ? (
                 <small className="server-quote-status mobile-status">Ticket saved · {serverTicket.ticketId.slice(0, 8)}</small>
               ) : null}
-              {serverTicketState === "error" ? <small className="server-quote-status error mobile-status">{serverTicketError}</small> : null}
+              {serverTicketState === "error" ? <small className="server-quote-status error mobile-status" role="alert">{serverTicketError}</small> : null}
               <button
                 className="checkout-btn"
                 disabled={!canUseCheckoutAction || checkoutBusy}
@@ -3756,7 +3790,7 @@ function AnimatedPayout({
 
 function AccountSkeleton({ rows }: { rows: number }) {
   return (
-    <div className="account-list">
+    <div className="account-list" role="status" aria-label="Loading account data">
       {Array.from({ length: rows }).map((_, index) => (
         <div className="account-row skeleton" key={index}>
           <div>

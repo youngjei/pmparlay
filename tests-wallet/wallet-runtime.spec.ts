@@ -77,7 +77,45 @@ test("loading and connecting the deferred wallet runtime preserves the basket", 
 
   await page.locator(".wallet-pill.connect").click();
   await expect.poll(() => walletRuntimeRequests).toBe(1);
-  await expect(page.locator(".wallet-pill")).toContainText("0xabc...1234");
+  await expect(page.getByRole("button", { name: /Disconnect wallet/ })).toBeVisible();
+  await expect(page.locator(".wallet-pill")).toContainText("Synced");
+  await expect(page.locator(".ticket-pane .leg-row")).toHaveCount(1);
+});
+
+test("a failed deferred wallet runtime keeps the app and basket available", async ({ page }) => {
+  let walletRuntimeRequests = 0;
+  await page.route("**/src/WalletRuntime.tsx*", async (route) => {
+    walletRuntimeRequests += 1;
+    await route.abort("failed");
+  });
+  await page.route("**/api/markets**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        asOf: new Date().toISOString(),
+        source: "polymarket",
+        complete: true,
+        outcomes: [
+          { ...market, id: "wallet-runtime-failure-yes", tokenId: "wallet-runtime-failure-yes-token", outcome: "Yes", price: 0.4 },
+          { ...market, id: "wallet-runtime-failure-no", tokenId: "wallet-runtime-failure-no-token", outcome: "No", price: 0.6 }
+        ],
+        pageInfo: { limit: 48, offset: 0, hasMore: false, total: 1 }
+      })
+    });
+  });
+
+  await page.goto("/");
+  const card = page.locator(".market-card").filter({ hasText: market.question });
+  await card.getByRole("button", { name: /Yes/ }).click();
+  await expect(page.locator(".ticket-pane .leg-row")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Connect wallet" }).click();
+  await expect.poll(() => walletRuntimeRequests).toBe(1);
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("Wallet connection is temporarily unavailable");
+  await expect(alert).toContainText("Your basket is still here");
+  await expect(alert.getByRole("button", { name: "Reload" })).toBeVisible();
+  await expect(page.locator("main")).toBeVisible();
   await expect(page.locator(".ticket-pane .leg-row")).toHaveCount(1);
 });
 

@@ -283,7 +283,6 @@ function publicCatalogWithFreshBooks(catalog: MarketCatalogPage, refreshedOutcom
 
   return {
     ...catalog,
-    asOf: now.toISOString(),
     outcomes,
     groups: [...groupsByKey.values()].map(({ marketIds: _marketIds, ...group }) => group)
   };

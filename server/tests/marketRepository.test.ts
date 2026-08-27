@@ -384,10 +384,30 @@ describe("market catalog persistence safety", () => {
     const prune = dbMocks.query.mock.calls.find(([sql]) => String(sql).includes("ranked_unreferenced"));
     const sql = String(prune?.[0]);
 
-    expect(prune?.[1]).toEqual([["market-db-id"]]);
-    expect(sql).toContain("ranked_unreferenced.snapshot_rank > 2");
+    expect(prune?.[1]).toEqual([["market-db-id"], 2]);
+    expect(sql).toContain("ranked_unreferenced.snapshot_rank > $2::integer");
     expect(sql).toContain("quote_legs.market_snapshot_id = market_snapshots.id");
     expect(sql).toContain("ticket_legs.settlement_source_snapshot_id = market_snapshots.id");
+  });
+
+  it("bounds snapshot retention from MARKET_SNAPSHOT_UNREFERENCED_RETENTION", async () => {
+    const original = process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
+    process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = "99";
+
+    try {
+      await persistMarketCatalog(catalogFixture(false), { now: new Date("2026-07-13T00:00:00.000Z") });
+      const prune = dbMocks.query.mock.calls.find(([sql]) => String(sql).includes("ranked_unreferenced"));
+      expect(prune?.[1]).toEqual([["market-db-id"], 10]);
+
+      dbMocks.query.mockClear();
+      process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = "0";
+      await persistMarketCatalog(catalogFixture(false), { now: new Date("2026-07-13T00:00:00.000Z") });
+      const minimumPrune = dbMocks.query.mock.calls.find(([sql]) => String(sql).includes("ranked_unreferenced"));
+      expect(minimumPrune?.[1]).toEqual([["market-db-id"], 1]);
+    } finally {
+      if (original === undefined) delete process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
+      else process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = original;
+    }
   });
 
   it("uses all observed groups for complete-sweep reconciliation even when new rows are skipped", async () => {

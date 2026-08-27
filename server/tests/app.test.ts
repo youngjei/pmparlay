@@ -430,6 +430,7 @@ describe("LEGWORK API", () => {
     const response = await app.inject({ method: "GET", url: "/api/markets" });
 
     expect(response.statusCode).toBe(200);
+    expect(response.json().asOf).toBe(catalogFixture().asOf);
     expect(hydrateQuoteOutcomes).toHaveBeenCalledWith(
       [candidate, oppositeCandidate],
       expect.any(AbortSignal),

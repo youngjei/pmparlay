@@ -17,9 +17,21 @@ Create the Railway services `Postgres` and `Redis`, then create these repository
 | `legwork-markets` | `npm run start:worker:market` | No |
 | `legwork-financial` | `npm run start:worker:financial` | No |
 
+This five-service layout is the approved small-scale staging topology. Before mainnet, upgrade Railway capacity and replace the two grouped worker services with five isolated worker services: market indexer, deposits, reconciliation, settlements, and outbox. Keep the public web/API, Postgres, and Redis as separate services.
+
 Railway automatically detects the root `Dockerfile`. Run `npm run db:migrate && npm run db:backfill-settlement-identities` as the `legwork-web` pre-deploy command. The grouped commands must run as one replica each. Use `/readyz` as the web health check: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all four required worker roles are healthy. `/healthz` is only a process-liveness check.
 
+Because the repository is private, grant the Railway GitHub App access to `youngjei/pmparlay` before enabling automatic deployments from `main`. `railway up` remains the manual deployment path while that permission is absent; do not replace the GitHub App permission with a personal access token stored in the repository.
+
 Do not run multiple replicas of either grouped worker service. PostgreSQL singleton leases reject duplicate financial workers, but deployment configuration should still request exactly one replica per group.
+
+The free staging Postgres volume is intentionally constrained. Use this start command so WAL remains bounded while the snapshot retention controls below limit retained catalog storage:
+
+```text
+wrapper.sh postgres --port=5432 -c max_connections=100 -c max_wal_size=96MB -c min_wal_size=32MB -c checkpoint_timeout=2min -c checkpoint_completion_target=0.9
+```
+
+These values are staging controls, not mainnet capacity targets. Upgrade the database volume and establish storage alerts, backups, and point-in-time recovery before mainnet.
 
 ## Shared Runtime Variables
 
@@ -45,6 +57,16 @@ MAX_MARKET_LIABILITY_USD=250
 MAX_EVENT_LIABILITY_USD=250
 OPS_API_KEY=<random secret with at least 32 bytes>
 ```
+
+Use these catalog controls on the grouped market service for the free staging footprint. Apply the liquidity and volume thresholds to `legwork-web` as well so public reads and indexing use the same eligibility policy:
+
+```text
+MARKET_CATALOG_MIN_LIQUIDITY_USD=10000
+MARKET_CATALOG_MIN_VOLUME_USD=50000
+MARKET_SNAPSHOT_UNREFERENCED_RETENTION=2
+```
+
+`MARKET_SNAPSHOT_UNREFERENCED_RETENTION` belongs only on `legwork-markets`. Keep at least two snapshots so pagination cursors survive an index refresh. It may be raised after Railway storage is upgraded, but quote- and ticket-referenced snapshots remain immutable regardless of this setting.
 
 `SAFE_API_KEY` is optional because LEGWORK does not automate Safe signing or broadcast. If it is configured for read-only Safe metadata, keep it backend-only and never prefix it with `VITE_`.
 

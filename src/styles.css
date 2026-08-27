@@ -466,7 +466,7 @@ summary:focus-visible {
 .market-loading-orbit::before {
   animation: marketSpin 820ms linear infinite;
   border: 3px solid rgba(17, 20, 15, 0.1);
-  border-top-color: var(--acid-dark);
+  border-top-color: var(--yes);
   border-radius: 999px;
   content: "";
   inset: 0;

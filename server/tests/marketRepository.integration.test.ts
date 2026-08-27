@@ -345,11 +345,11 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     expect(constraint.rows[0].convalidated).toBe(true);
   });
 
-  it("keeps only two unreferenced snapshots per repeatedly refreshed market", async () => {
+  it("keeps the production default of two unreferenced snapshots", async () => {
     const base = Date.now();
     for (let index = 0; index < 5; index += 1) {
       const asOf = new Date(base + index * 1_000).toISOString();
-      await repository.persistMarketCatalog(catalog(asOf, [indexedOutcome("bounded-snapshots", 10_000 + index, asOf)]));
+      await repository.persistMarketCatalog(catalog(asOf, [indexedOutcome("bounded-snapshots", 10_000 + index, asOf, "Politics", `revision-${index}`)]));
     }
 
     const snapshots = await admin.query(
@@ -362,6 +362,35 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     );
 
     expect(snapshots.rows[0].count).toBe(2);
+  });
+
+  it("honors the bounded MARKET_SNAPSHOT_UNREFERENCED_RETENTION override", async () => {
+    const originalRetention = process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
+    process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = "3";
+
+    try {
+      const base = Date.now();
+      for (let index = 0; index < 5; index += 1) {
+        const asOf = new Date(base + index * 1_000).toISOString();
+        await repository.persistMarketCatalog(
+          catalog(asOf, [indexedOutcome("configured-retention", 10_000 + index, asOf, "Politics", `revision-${index}`)])
+        );
+      }
+
+      const snapshots = await admin.query(
+        `
+          SELECT count(*)::integer AS count
+          FROM "${schema}".market_snapshots
+          JOIN "${schema}".markets ON markets.id = market_snapshots.market_id
+          WHERE markets.source_market_id = 'configured-retention'
+        `
+      );
+
+      expect(snapshots.rows[0].count).toBe(3);
+    } finally {
+      if (originalRetention === undefined) delete process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
+      else process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = originalRetention;
+    }
   });
 
   it("prunes the reconciliation snapshot of a market missing from a complete sweep", async () => {

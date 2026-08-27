@@ -109,6 +109,15 @@ function hashJson(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function unreferencedSnapshotRetentionFromEnv() {
+  const configured = process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
+  if (configured === undefined || configured.trim() === "") return 2;
+
+  const parsed = Number(configured);
+  if (!Number.isFinite(parsed)) return 2;
+  return Math.min(Math.max(Math.floor(parsed), 1), 10);
+}
+
 function finiteNumbers(values: Array<number | undefined>) {
   return values.filter((value): value is number => Number.isFinite(value));
 }
@@ -477,6 +486,7 @@ async function insertTombstoneSnapshot(client: pg.PoolClient, marketId: string, 
 async function pruneUnreferencedMarketSnapshots(client: pg.PoolClient, marketIds: string[]) {
   const uniqueIds = [...new Set(marketIds)];
   if (uniqueIds.length === 0) return 0;
+  const retention = unreferencedSnapshotRetentionFromEnv();
 
   const result = await client.query(
     `
@@ -503,9 +513,9 @@ async function pruneUnreferencedMarketSnapshots(client: pg.PoolClient, marketIds
       DELETE FROM market_snapshots
       USING ranked_unreferenced
       WHERE market_snapshots.id = ranked_unreferenced.id
-        AND ranked_unreferenced.snapshot_rank > 2
+        AND ranked_unreferenced.snapshot_rank > $2::integer
     `,
-    [uniqueIds]
+    [uniqueIds, retention]
   );
 
   return result.rowCount || 0;

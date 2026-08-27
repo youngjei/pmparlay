@@ -381,31 +381,45 @@ describe("LEGWORK API", () => {
       acceptingOrders: true,
       enableOrderBook: true
     };
+    const oppositeCandidate = {
+      ...catalogFixture().outcomes[1],
+      conditionId: candidate.conditionId,
+      tokenId: "token-no",
+      eventGroupKey: candidate.eventGroupKey,
+      eventTitle: candidate.eventTitle,
+      eventSlug: candidate.eventSlug,
+      sourceActive: true,
+      closed: false,
+      archived: false,
+      acceptingOrders: true,
+      enableOrderBook: true
+    };
     const hydrateQuoteOutcomes = vi.fn(async (_outcomes, _signal, options) => ({
       complete: true,
       attemptedChunks: 1,
       successfulChunks: 1,
-      outcomes: [
-        {
-          ...candidate,
-          price: 0.61,
-          bestBid: 0.6,
-          bestAsk: 0.61,
-          executablePrice: 0.61,
-          vwapPrice: 0.61,
+      outcomes: [candidate, oppositeCandidate].map((outcome, index) => {
+        const price = index === 0 ? 0.61 : 0.41;
+        return {
+          ...outcome,
+          price,
+          bestBid: price - 0.01,
+          bestAsk: price,
+          executablePrice: price,
+          vwapPrice: price,
           requestedNotionalUsd: 25,
           availableAskNotionalUsd: 100,
           spread: 0.01,
           priceSource: "clob_vwap" as const,
           orderbookTimestamp: now,
           sourceAsOf: now
-        }
-      ]
+        };
+      })
     }));
     const app = buildApp({
       getPersistedMarketCatalogPage: async () => ({
         ...catalogFixture(),
-        outcomes: [candidate],
+        outcomes: [candidate, oppositeCandidate],
         groups: [],
         pageInfo: { limit: 48, offset: 0, hasMore: false, total: 1 }
       }),
@@ -417,11 +431,14 @@ describe("LEGWORK API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(hydrateQuoteOutcomes).toHaveBeenCalledWith(
-      [candidate],
+      [candidate, oppositeCandidate],
       expect.any(AbortSignal),
       expect.objectContaining({ requestedNotionalUsd: 25, retainUnexecutable: true, requireExplicitLifecycle: true })
     );
-    expect(response.json().outcomes).toEqual([expect.objectContaining({ id: candidate.id, price: 0.61, priceSource: "clob_vwap" })]);
+    expect(response.json().outcomes).toEqual([
+      expect.objectContaining({ id: candidate.id, price: 0.61, priceSource: "clob_vwap" }),
+      expect.objectContaining({ id: oppositeCandidate.id, price: 0.41, priceSource: "clob_vwap" })
+    ]);
   });
 
   it("fills a public market page past candidates without executable order books", async () => {
@@ -439,6 +456,12 @@ describe("LEGWORK API", () => {
       acceptingOrders: true,
       enableOrderBook: true
     };
+    const firstOppositeCandidate = {
+      ...firstCandidate,
+      id: "first-no",
+      tokenId: "token-one-no",
+      outcome: "No"
+    };
     const secondCandidate = {
       ...firstCandidate,
       id: "second-yes",
@@ -449,9 +472,15 @@ describe("LEGWORK API", () => {
       eventTitle: "Second market",
       eventSlug: "second"
     };
+    const secondOppositeCandidate = {
+      ...secondCandidate,
+      id: "second-no",
+      tokenId: "token-two-no",
+      outcome: "No"
+    };
     const getPersistedMarketCatalogPage = vi.fn(async (query) => ({
       ...catalogFixture(),
-      outcomes: query?.cursor ? [secondCandidate] : [firstCandidate],
+      outcomes: query?.cursor ? [secondCandidate, secondOppositeCandidate] : [firstCandidate, firstOppositeCandidate],
       groups: [],
       pageInfo: query?.cursor
         ? { limit: 1, offset: 0, hasMore: false, total: 2 }
@@ -464,13 +493,13 @@ describe("LEGWORK API", () => {
       outcomes:
         outcomes[0]?.id === firstCandidate.id
           ? outcomes
-          : outcomes.map((outcome: typeof secondCandidate) => ({
+          : outcomes.map((outcome: typeof secondCandidate, index: number) => ({
               ...outcome,
-              price: 0.61,
-              bestBid: 0.6,
-              bestAsk: 0.61,
-              executablePrice: 0.61,
-              vwapPrice: 0.61,
+              price: index === 0 ? 0.61 : 0.41,
+              bestBid: index === 0 ? 0.6 : 0.4,
+              bestAsk: index === 0 ? 0.61 : 0.41,
+              executablePrice: index === 0 ? 0.61 : 0.41,
+              vwapPrice: index === 0 ? 0.61 : 0.41,
               requestedNotionalUsd: 25,
               availableAskNotionalUsd: 100,
               spread: 0.01,
@@ -490,9 +519,59 @@ describe("LEGWORK API", () => {
       expect.objectContaining({ cursor: "second-page", limit: 1, requireFreshOrderBook: false })
     );
     expect(response.json()).toMatchObject({
-      outcomes: [expect.objectContaining({ id: secondCandidate.id, marketId: secondCandidate.marketId })],
+      outcomes: [
+        expect.objectContaining({ id: secondCandidate.id, marketId: secondCandidate.marketId }),
+        expect.objectContaining({ id: secondOppositeCandidate.id, marketId: secondCandidate.marketId })
+      ],
       pageInfo: { limit: 1, hasMore: false }
     });
+  });
+
+  it("removes the entire market when a refreshed side is at the skew boundary", async () => {
+    const now = new Date().toISOString();
+    const candidates = catalogFixture().outcomes.slice(0, 2).map((outcome, index) => ({
+      ...outcome,
+      conditionId: "0xskewed",
+      tokenId: index === 0 ? "token-yes" : "token-no",
+      sourceActive: true,
+      closed: false,
+      archived: false,
+      acceptingOrders: true,
+      enableOrderBook: true
+    }));
+    const app = buildApp({
+      getPersistedMarketCatalogPage: async () => ({
+        ...catalogFixture(),
+        outcomes: candidates,
+        groups: [],
+        pageInfo: { limit: 48, offset: 0, hasMore: false, total: 1 }
+      }),
+      hydrateQuoteOutcomes: async () => ({
+        complete: true,
+        attemptedChunks: 1,
+        successfulChunks: 1,
+        outcomes: candidates.map((outcome, index) => ({
+          ...outcome,
+          price: index === 0 ? 0.01 : 0.99,
+          bestBid: index === 0 ? 0.009 : 0.989,
+          bestAsk: index === 0 ? 0.01 : 0.99,
+          executablePrice: index === 0 ? 0.01 : 0.99,
+          vwapPrice: index === 0 ? 0.01 : 0.99,
+          requestedNotionalUsd: 25,
+          availableAskNotionalUsd: 100,
+          spread: 0.001,
+          priceSource: "clob_vwap" as const,
+          orderbookTimestamp: now,
+          sourceAsOf: now
+        }))
+      })
+    });
+    openApps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/markets" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().outcomes).toEqual([]);
   });
 
   it("rejects oversized market catalog pages", async () => {

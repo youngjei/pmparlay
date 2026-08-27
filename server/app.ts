@@ -133,6 +133,8 @@ const routeRateLimits = {
 } as const;
 
 const MAX_MARKET_PAGE_FILL_ATTEMPTS = 4;
+const PUBLIC_MARKET_MIN_PRICE = 0.01;
+const PUBLIC_MARKET_MAX_PRICE = 0.99;
 
 function hasOpsAccess(authorization?: string) {
   if (!config.OPS_API_KEY) {
@@ -231,13 +233,35 @@ function paymentErrorResponse(message: string, paymentIntent?: QuotePaymentInten
 }
 
 function publicCatalogWithFreshBooks(catalog: MarketCatalogPage, refreshedOutcomes: MarketCatalogPage["outcomes"], now = new Date()) {
-  const outcomes = annotateCatalogOutcomes(refreshedOutcomes, {
+  const annotatedOutcomes = annotateCatalogOutcomes(refreshedOutcomes, {
     now,
     eligibilityConfig: {
       ...marketEligibilityConfigFromEnv(),
       requireOrderBook: true
     }
-  }).filter((outcome) => outcome.eligibility?.eligible !== false);
+  });
+  const marketState = new Map<string, { total: number; eligible: number; blocked: boolean }>();
+
+  for (const outcome of annotatedOutcomes) {
+    const state = marketState.get(outcome.marketId) || { total: 0, eligible: 0, blocked: false };
+    const executablePrice = outcome.executablePrice ?? outcome.price;
+    state.total += 1;
+    if (outcome.eligibility?.eligible !== false) state.eligible += 1;
+    if (
+      outcome.eligibility?.eligible === false ||
+      !Number.isFinite(executablePrice) ||
+      executablePrice <= PUBLIC_MARKET_MIN_PRICE ||
+      executablePrice >= PUBLIC_MARKET_MAX_PRICE
+    ) {
+      state.blocked = true;
+    }
+    marketState.set(outcome.marketId, state);
+  }
+
+  const outcomes = annotatedOutcomes.filter((outcome) => {
+    const state = marketState.get(outcome.marketId);
+    return Boolean(state && !state.blocked && state.total >= 2 && state.eligible === state.total);
+  });
   const groupsByKey = new Map<string, MarketCatalogGroup & { marketIds: Set<string> }>();
 
   for (const outcome of outcomes) {

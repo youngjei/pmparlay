@@ -2023,7 +2023,8 @@ export function buildApp(dependencies: AppDependencies = {}) {
   if (serveFrontend) {
     app.setNotFoundHandler((request, reply) => {
       const acceptsHtml = request.headers.accept?.includes("text/html");
-      if (request.method === "GET" && acceptsHtml && !request.url.startsWith("/api/")) {
+      const isAppRoute = request.url === "/" || (acceptsHtml && !request.url.startsWith("/api/"));
+      if (request.method === "GET" && isAppRoute) {
         return reply.header("Cache-Control", "no-cache").type("text/html").sendFile("index.html");
       }
 

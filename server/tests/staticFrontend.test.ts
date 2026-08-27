@@ -23,7 +23,7 @@ describe("production frontend delivery", () => {
     const app = buildApp({ serveFrontend: true, frontendRoot: root });
     apps.push(app);
 
-    const home = await app.inject({ method: "GET", url: "/", headers: { accept: "text/html" } });
+    const home = await app.inject({ method: "GET", url: "/" });
     expect(home.statusCode).toBe(200);
     expect(home.headers["cache-control"]).toBe("no-cache");
     expect(home.headers["content-security-policy"]).toContain("default-src 'self'");

@@ -1,7 +1,7 @@
 # LEGWORK Implementation Checklist
 
 Status: Canonical
-Last updated: 2026-07-21
+Last updated: 2026-08-27
 
 An item is complete only after implementation, automated testing, runtime verification, and independent QA when the risk or blast radius warrants it. The current release target is supervised Sepolia staging, not mainnet.
 
@@ -64,11 +64,12 @@ For supervised Sepolia, Polygon RPC is intentionally deferred by product decisio
 - [x] Historical 14 Sepolia USDC removed from the Safe.
 - [x] Funded gitignored bot wallet available.
 - [ ] New opening house capital sent to the Safe and recorded from its transaction evidence.
-- [ ] Managed staging hosting, Postgres, Redis, secret storage, and monitoring architecture approved.
+- [ ] Managed staging hosting, Postgres, Redis, secret storage, and monitoring architecture approved and configured as five Railway services: Postgres, Redis, `legwork-web`, grouped markets/outbox, and grouped financial workers.
 - [ ] Previously shared Safe API key rotated before any mainnet or public production deployment (explicitly deferred during the supervised friends-and-family Sepolia beta).
 
 ## Deferred Beyond Sprint 4
 
+- [ ] Before mainnet: upgrade Railway and split the grouped workers into five isolated services: market indexer, deposits, reconciliation, settlements, and outbox.
 - Authenticated operator RBAC and production-grade dual approval.
 - Managed cloud deployment, external monitoring, and managed PITR rehearsal.
 - Mainnet Safe policy, legal/geo gates, bankroll approval, onchain settlement-source decision, and external security audit.

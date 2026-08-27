@@ -58,7 +58,9 @@
     "start:worker:outbox": "tsx server/workers/outboxWorker.ts",
     "start:worker:settlements": "tsx server/workers/settlementResolverWorker.ts",
     "start:worker:deposits": "tsx server/workers/usdcDepositScannerWorker.ts",
-    "start:worker:reconciliation": "tsx server/workers/reconciliationWorker.ts"
+    "start:worker:reconciliation": "tsx server/workers/reconciliationWorker.ts",
+    "start:worker:market": "tsx server/workers/workerGroupSupervisor.ts market",
+    "start:worker:financial": "tsx server/workers/workerGroupSupervisor.ts financial"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

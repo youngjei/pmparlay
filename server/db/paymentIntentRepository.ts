@@ -1272,6 +1272,24 @@ async function reconcileExistingConfirmedDeposit(client: pg.PoolClient, intent: 
   const deposit = depositResult.rows[0];
   if (!deposit?.credited_transaction_id) return undefined;
 
+  const amountMicroUnits = BigInt(deposit.amount_micro_units);
+  const availableAccountId = await ensureLedgerAccount(client, intent.user_id, "user_usdc_available", "USDC");
+  const checkoutAccountId = await ensureLedgerAccount(client, intent.user_id, "user_usdc_checkout", "USDC");
+  await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", [
+    [availableAccountId, checkoutAccountId].sort()
+  ]);
+  const availableBalance = await ledgerBalanceMicroUnits(client, availableAccountId);
+  if (availableBalance < amountMicroUnits) {
+    await markIntentRecoverableInTransaction(client, {
+      intent,
+      reason: intent.recovery_reason || "activation_failed",
+      detail:
+        intent.recovery_detail ||
+        "Previously credited deposit funds are no longer available for quote payment checkout."
+    });
+    return undefined;
+  }
+
   await client.query(
     `
       UPDATE onchain_deposits
@@ -1284,7 +1302,7 @@ async function reconcileExistingConfirmedDeposit(client: pg.PoolClient, intent: 
     intent,
     depositId: deposit.id,
     walletId: "",
-    amountMicroUnits: BigInt(deposit.amount_micro_units),
+    amountMicroUnits,
     confirmations: 0,
     rebindingCreditedDeposit: true
   });

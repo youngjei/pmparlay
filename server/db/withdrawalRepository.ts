@@ -413,7 +413,9 @@ export async function createWithdrawalRequest(input: {
 
     const userAccountId = await ensureLedgerAccount(client, input.userId, "user_usdc_available", "USDC");
     const pendingAccountId = await ensureLedgerAccount(client, null, "pending_usdc_withdrawals", "USDC");
-    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) FOR UPDATE", [[pendingAccountId, userAccountId].sort()]);
+    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", [
+      [pendingAccountId, userAccountId].sort()
+    ]);
     const balance = await ledgerBalanceMicroUnits(client, userAccountId);
     if (balance < input.amountMicroUnits) {
       throw new Error("insufficient_user_balance");
@@ -619,7 +621,9 @@ export async function cancelWithdrawalRequest(input: CancelWithdrawalInput): Pro
     const amountMicroUnits = BigInt(request.amount_micro_units);
     const userAccountId = await ensureLedgerAccount(client, request.user_id, "user_usdc_available", "USDC");
     const pendingAccountId = await ensureLedgerAccount(client, null, "pending_usdc_withdrawals", "USDC");
-    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) FOR UPDATE", [[pendingAccountId, userAccountId].sort()]);
+    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", [
+      [pendingAccountId, userAccountId].sort()
+    ]);
 
     const transactionId = randomUUID();
     await client.query(

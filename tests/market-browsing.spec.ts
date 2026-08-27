@@ -203,6 +203,114 @@ test("market catalog loads 48 per page and resets on search, category, and sort"
   await expect(page.locator(".market-card")).toContainText("sorted-reset market");
 });
 
+test("revisiting a category restores cached markets while revalidating", async ({ page }) => {
+  const allMarkets = generatedMarkets(1, "all", "Politics");
+  const firstSports = generatedMarkets(1, "sports-cached", "Sports");
+  const refreshedSports = generatedMarkets(1, "sports-refreshed", "Sports");
+  const cryptoMarkets = generatedMarkets(1, "crypto", "Crypto");
+  let sportsRequests = 0;
+
+  await routeMarkets(page, (url) => {
+    const category = url.searchParams.get("category");
+    if (category === "Sports") {
+      sportsRequests += 1;
+      return sportsRequests === 1
+        ? catalog(firstSports)
+        : marketRouteResult(catalog(refreshedSports), { delayMs: 800 });
+    }
+    if (category === "Crypto") return catalog(cryptoMarkets);
+    return catalog(allMarkets);
+  });
+
+  await page.goto("/");
+  const filters = page.getByRole("group", { name: "Category filters" });
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+  await expect(page.getByText("sports-cached market 1")).toBeVisible();
+
+  await filters.getByRole("button", { name: "Crypto", exact: true }).click();
+  await expect(page.getByText("crypto market 1")).toBeVisible();
+
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+  await expect(page.getByText("sports-cached market 1")).toBeVisible({ timeout: 250 });
+  await expect(page.getByText("sports-refreshed market 1")).toBeVisible({ timeout: 1_500 });
+  await expect(page.getByText("sports-cached market 1")).toHaveCount(0);
+});
+
+test("cached markets remain usable when background revalidation fails", async ({ page }) => {
+  const allMarkets = generatedMarkets(1, "all", "Politics");
+  const sportsMarkets = generatedMarkets(1, "sports-saved", "Sports");
+  const cryptoMarkets = generatedMarkets(1, "crypto", "Crypto");
+  let sportsRequests = 0;
+
+  await routeMarkets(page, (url) => {
+    const category = url.searchParams.get("category");
+    if (category === "Sports") {
+      sportsRequests += 1;
+      return sportsRequests === 1
+        ? catalog(sportsMarkets)
+        : marketRouteResult({ error: "market_catalog_unavailable" }, { status: 503, delayMs: 300 });
+    }
+    if (category === "Crypto") return catalog(cryptoMarkets);
+    return catalog(allMarkets);
+  });
+
+  await page.goto("/");
+  const filters = page.getByRole("group", { name: "Category filters" });
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+  await expect(page.getByText("sports-saved market 1")).toBeVisible();
+  await filters.getByRole("button", { name: "Crypto", exact: true }).click();
+  await expect(page.getByText("crypto market 1")).toBeVisible();
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+
+  await expect(page.getByText("sports-saved market 1")).toBeVisible({ timeout: 250 });
+  await expect(page.getByText("Market catalog notice")).toBeVisible({ timeout: 1_000 });
+  await expect(page.getByText("sports-saved market 1")).toBeVisible();
+});
+
+test("a selected cached leg adopts the revalidated market price", async ({ page }) => {
+  const allMarkets = generatedMarkets(1, "all", "Politics");
+  const sportsMarket = [{ ...generatedMarkets(1, "sports-reprice", "Sports")[0], yesPrice: 0.4 }];
+  const repricedSportsMarket = [{ ...sportsMarket[0], yesPrice: 0.6 }];
+  const cryptoMarkets = generatedMarkets(1, "crypto", "Crypto");
+  let sportsRequests = 0;
+
+  await routeMarkets(page, (url) => {
+    const category = url.searchParams.get("category");
+    if (category === "Sports") {
+      sportsRequests += 1;
+      return sportsRequests === 1
+        ? catalog(sportsMarket)
+        : marketRouteResult(catalog(repricedSportsMarket), { delayMs: 500 });
+    }
+    if (category === "Crypto") return catalog(cryptoMarkets);
+    return catalog(allMarkets);
+  });
+
+  await page.goto("/");
+  const filters = page.getByRole("group", { name: "Category filters" });
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+  await page.getByRole("button", { name: /^Yes\s+40¢ for / }).click();
+  await expect(page.locator(".ticket-pane .leg-row")).toContainText("Yes at 40¢");
+  await filters.getByRole("button", { name: "Crypto", exact: true }).click();
+  await expect(page.getByText("crypto market 1")).toBeVisible();
+  await filters.getByRole("button", { name: "Sports", exact: true }).click();
+
+  await expect(page.locator(".ticket-pane .leg-row")).toContainText("Yes at 40¢", { timeout: 250 });
+  await expect(page.locator(".ticket-pane .leg-row")).toContainText("Yes at 60¢", { timeout: 1_000 });
+});
+
+test("No prices remain red before and after selection", async ({ page }) => {
+  await routeMarkets(page, () => catalog(generatedMarkets(1, "no-color", "Sports")));
+  await page.goto("/");
+
+  const noButton = page.getByRole("button", { name: /^No\s+\d+¢ for / });
+  const noPrice = noButton.locator("strong");
+  await expect(noPrice).toHaveCSS("color", "rgb(184, 57, 57)");
+  await noButton.click();
+  await expect(noButton).toHaveAttribute("aria-pressed", "true");
+  await expect(noPrice).toHaveCSS("color", "rgb(255, 119, 112)");
+});
+
 test("a delayed append cannot overwrite a newer search generation", async ({ page }) => {
   const firstPage = generatedMarkets(48, "initial", "Sports");
   const delayedPage = generatedMarkets(1, "stale-append", "Sports", 49);

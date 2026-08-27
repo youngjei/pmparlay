@@ -331,248 +331,49 @@ describe("LEGWORK API", () => {
     );
   });
 
-  it("validates and forwards bounded persisted market catalog queries", async () => {
-    let receivedQuery: unknown;
+  it("serves persisted eligible discovery pages without CLOB hydration and forwards category, sort, and pagination", async () => {
+    const getPersistedMarketCatalogPage = vi.fn(async (query) => {
+      return {
+        ...catalogFixture(),
+        groups: [],
+        pageInfo: {
+          limit: query?.limit || 48,
+          offset: 0,
+          hasMore: false,
+          total: 3
+        }
+      };
+    });
+    const hydrateQuoteOutcomes = vi.fn(async () => {
+      throw new Error("discovery_hydration_should_not_run");
+    });
     const app = buildApp({
-      getPersistedMarketCatalogPage: async (query) => {
-        receivedQuery = query;
-        return {
-          ...catalogFixture(),
-          groups: [],
-          pageInfo: {
-            limit: query?.limit || 48,
-            offset: 0,
-            hasMore: false,
-            total: 3
-          }
-        };
-      }
+      getPersistedMarketCatalogPage,
+      hydrateQuoteOutcomes
     });
     openApps.push(app);
 
     const response = await app.inject({
       method: "GET",
-      url: "/api/markets?limit=24&category=Sports&sort=ending_soon&search=world%20cup"
+      url: "/api/markets?cursor=next-page&limit=24&category=Sports&sort=ending_soon&search=world%20cup"
     });
 
     expect(response.statusCode).toBe(200);
-    expect(receivedQuery).toEqual({
-      cursor: undefined,
+    expect(getPersistedMarketCatalogPage).toHaveBeenCalledTimes(1);
+    expect(getPersistedMarketCatalogPage).toHaveBeenCalledWith({
+      cursor: "next-page",
       limit: 24,
       search: "world cup",
       category: "Sports",
       sort: "ending_soon",
-      eventGroupKey: undefined
+      eventGroupKey: undefined,
+      requireFreshOrderBook: true,
+      maxSnapshotAgeMs: Math.min(
+        config.MARKET_CATALOG_HARD_MAX_AGE_MS,
+        Math.max(config.MARKET_CATALOG_MAX_AGE_MS, config.MARKET_INDEX_INTERVAL_MS * 2)
+      )
     });
-  });
-
-  it("refreshes persisted discovery candidates before returning public market prices", async () => {
-    const now = new Date().toISOString();
-    const candidate = {
-      ...catalogFixture().outcomes[0],
-      conditionId: "0xcondition",
-      tokenId: "token-yes",
-      eventGroupKey: "polymarket:event:bitcoin-up-or-down",
-      eventTitle: "Bitcoin Up or Down?",
-      eventSlug: "bitcoin-up-or-down",
-      sourceActive: true,
-      closed: false,
-      archived: false,
-      acceptingOrders: true,
-      enableOrderBook: true
-    };
-    const oppositeCandidate = {
-      ...catalogFixture().outcomes[1],
-      conditionId: candidate.conditionId,
-      tokenId: "token-no",
-      eventGroupKey: candidate.eventGroupKey,
-      eventTitle: candidate.eventTitle,
-      eventSlug: candidate.eventSlug,
-      sourceActive: true,
-      closed: false,
-      archived: false,
-      acceptingOrders: true,
-      enableOrderBook: true
-    };
-    const hydrateQuoteOutcomes = vi.fn(async (_outcomes, _signal, options) => ({
-      complete: true,
-      attemptedChunks: 1,
-      successfulChunks: 1,
-      outcomes: [candidate, oppositeCandidate].map((outcome, index) => {
-        const price = index === 0 ? 0.61 : 0.41;
-        return {
-          ...outcome,
-          price,
-          bestBid: price - 0.01,
-          bestAsk: price,
-          executablePrice: price,
-          vwapPrice: price,
-          requestedNotionalUsd: 25,
-          availableAskNotionalUsd: 100,
-          spread: 0.01,
-          priceSource: "clob_vwap" as const,
-          orderbookTimestamp: now,
-          sourceAsOf: now
-        };
-      })
-    }));
-    const app = buildApp({
-      getPersistedMarketCatalogPage: async () => ({
-        ...catalogFixture(),
-        outcomes: [candidate, oppositeCandidate],
-        groups: [],
-        pageInfo: { limit: 48, offset: 0, hasMore: false, total: 1 }
-      }),
-      hydrateQuoteOutcomes
-    });
-    openApps.push(app);
-
-    const response = await app.inject({ method: "GET", url: "/api/markets" });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json().asOf).toBe(catalogFixture().asOf);
-    expect(hydrateQuoteOutcomes).toHaveBeenCalledWith(
-      [candidate, oppositeCandidate],
-      expect.any(AbortSignal),
-      expect.objectContaining({ requestedNotionalUsd: 25, retainUnexecutable: true, requireExplicitLifecycle: true })
-    );
-    expect(response.json().outcomes).toEqual([
-      expect.objectContaining({ id: candidate.id, price: 0.61, priceSource: "clob_vwap" }),
-      expect.objectContaining({ id: oppositeCandidate.id, price: 0.41, priceSource: "clob_vwap" })
-    ]);
-  });
-
-  it("fills a public market page past candidates without executable order books", async () => {
-    const now = new Date().toISOString();
-    const firstCandidate = {
-      ...catalogFixture().outcomes[0],
-      conditionId: "0xcondition-one",
-      tokenId: "token-one",
-      eventGroupKey: "polymarket:event:first",
-      eventTitle: "First market",
-      eventSlug: "first",
-      sourceActive: true,
-      closed: false,
-      archived: false,
-      acceptingOrders: true,
-      enableOrderBook: true
-    };
-    const firstOppositeCandidate = {
-      ...firstCandidate,
-      id: "first-no",
-      tokenId: "token-one-no",
-      outcome: "No"
-    };
-    const secondCandidate = {
-      ...firstCandidate,
-      id: "second-yes",
-      marketId: "second-market",
-      conditionId: "0xcondition-two",
-      tokenId: "token-two",
-      eventGroupKey: "polymarket:event:second",
-      eventTitle: "Second market",
-      eventSlug: "second"
-    };
-    const secondOppositeCandidate = {
-      ...secondCandidate,
-      id: "second-no",
-      tokenId: "token-two-no",
-      outcome: "No"
-    };
-    const getPersistedMarketCatalogPage = vi.fn(async (query) => ({
-      ...catalogFixture(),
-      outcomes: query?.cursor ? [secondCandidate, secondOppositeCandidate] : [firstCandidate, firstOppositeCandidate],
-      groups: [],
-      pageInfo: query?.cursor
-        ? { limit: 1, offset: 0, hasMore: false, total: 2 }
-        : { limit: 1, offset: 0, nextCursor: "second-page", hasMore: true, total: 2 }
-    }));
-    const hydrateQuoteOutcomes = vi.fn(async (outcomes) => ({
-      complete: true,
-      attemptedChunks: 1,
-      successfulChunks: 1,
-      outcomes:
-        outcomes[0]?.id === firstCandidate.id
-          ? outcomes
-          : outcomes.map((outcome: typeof secondCandidate, index: number) => ({
-              ...outcome,
-              price: index === 0 ? 0.61 : 0.41,
-              bestBid: index === 0 ? 0.6 : 0.4,
-              bestAsk: index === 0 ? 0.61 : 0.41,
-              executablePrice: index === 0 ? 0.61 : 0.41,
-              vwapPrice: index === 0 ? 0.61 : 0.41,
-              requestedNotionalUsd: 25,
-              availableAskNotionalUsd: 100,
-              spread: 0.01,
-              priceSource: "clob_vwap" as const,
-              orderbookTimestamp: now,
-              sourceAsOf: now
-            }))
-    }));
-    const app = buildApp({ getPersistedMarketCatalogPage, hydrateQuoteOutcomes });
-    openApps.push(app);
-
-    const response = await app.inject({ method: "GET", url: "/api/markets?limit=1" });
-
-    expect(response.statusCode).toBe(200);
-    expect(getPersistedMarketCatalogPage).toHaveBeenCalledTimes(2);
-    expect(getPersistedMarketCatalogPage.mock.calls[1]?.[0]).toEqual(
-      expect.objectContaining({ cursor: "second-page", limit: 1, requireFreshOrderBook: false })
-    );
-    expect(response.json()).toMatchObject({
-      outcomes: [
-        expect.objectContaining({ id: secondCandidate.id, marketId: secondCandidate.marketId }),
-        expect.objectContaining({ id: secondOppositeCandidate.id, marketId: secondCandidate.marketId })
-      ],
-      pageInfo: { limit: 1, hasMore: false }
-    });
-  });
-
-  it("removes the entire market when a refreshed side is at the skew boundary", async () => {
-    const now = new Date().toISOString();
-    const candidates = catalogFixture().outcomes.slice(0, 2).map((outcome, index) => ({
-      ...outcome,
-      conditionId: "0xskewed",
-      tokenId: index === 0 ? "token-yes" : "token-no",
-      sourceActive: true,
-      closed: false,
-      archived: false,
-      acceptingOrders: true,
-      enableOrderBook: true
-    }));
-    const app = buildApp({
-      getPersistedMarketCatalogPage: async () => ({
-        ...catalogFixture(),
-        outcomes: candidates,
-        groups: [],
-        pageInfo: { limit: 48, offset: 0, hasMore: false, total: 1 }
-      }),
-      hydrateQuoteOutcomes: async () => ({
-        complete: true,
-        attemptedChunks: 1,
-        successfulChunks: 1,
-        outcomes: candidates.map((outcome, index) => ({
-          ...outcome,
-          price: index === 0 ? 0.01 : 0.99,
-          bestBid: index === 0 ? 0.009 : 0.989,
-          bestAsk: index === 0 ? 0.01 : 0.99,
-          executablePrice: index === 0 ? 0.01 : 0.99,
-          vwapPrice: index === 0 ? 0.01 : 0.99,
-          requestedNotionalUsd: 25,
-          availableAskNotionalUsd: 100,
-          spread: 0.001,
-          priceSource: "clob_vwap" as const,
-          orderbookTimestamp: now,
-          sourceAsOf: now
-        }))
-      })
-    });
-    openApps.push(app);
-
-    const response = await app.inject({ method: "GET", url: "/api/markets" });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json().outcomes).toEqual([]);
+    expect(hydrateQuoteOutcomes).not.toHaveBeenCalled();
   });
 
   it("rejects oversized market catalog pages", async () => {

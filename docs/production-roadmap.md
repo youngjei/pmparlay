@@ -1,7 +1,7 @@
 # LEGWORK Production Roadmap
 
 Status: Canonical
-Last updated: 2026-07-21
+Last updated: 2026-08-28
 
 The immediate release target is supervised Sepolia staging. Mainnet gates are intentionally revisited immediately before an invite-only Ethereum launch.
 
@@ -11,7 +11,7 @@ The immediate release target is supervised Sepolia staging. Mainnet gates are in
 - Phase 3 now supports two explicit authorities. Supervised Sepolia uses Polymarket Gamma plus CLOB with immutable identity checks, terminal-result agreement, and two append-only matching observations separated by a PostgreSQL-enforced stability window. The dormant Polygon CTF quorum path is retained for later mainnet review; no single API response can authorize a payout.
 - Phase 4 core ledger, deposit, claim, withdrawal, Safe proposal, reconciliation, supervised house-funding evidence, transfer ownership, and reorg compensation controls are implemented. Financial workers have success-aware health checks and PostgreSQL singleton leases. The isolated staging database is the canonical financial test environment. Its Safe and ledger now reconcile from zero; a new deliberate opening-capital transfer still must be sent and recorded. House-funding operator labels are audit metadata, not authenticated dual control.
 - Phase 5 is partial. Route limits, Redis fail-closed behavior, production configuration guards, secret scanning, CI, success-aware runtime health, supervised runbooks, and a local backup restore rehearsal exist. Anonymous frontend entry code is below a 250 KiB gzip budget and the deferred wallet runtime is below a 650 KiB gzip budget, with CI and Playwright regression gates. Verified operator RBAC, external monitoring, managed backup/PITR rehearsal against the current schema, and audited repair tooling remain.
-- Phase 6 local isolation is in progress. `legwork_sepolia_staging` is current through migration `0043`, with zero copied financial rows, Redis database 1, pinned Safe owner/threshold, and zero unexplained reconciliation difference. A protected pre-migration backup exists. Opening funding, the automated burner-wallet lifecycle, real settlement-to-claim, and renewed worker restart/restore drills remain incomplete. No managed staging runtime or external monitoring has been deployed.
+- Phase 6 is deployed on the approved small-scale Railway topology with a public web/API service, managed Postgres and Redis, and grouped market/outbox and financial workers. Readiness verifies fresh successful heartbeats for market, deposit, reconciliation, and settlement processing. Opening funding, the automated burner-wallet lifecycle, real settlement-to-claim, managed backup/PITR rehearsal, and external alerting remain incomplete.
 - Ethereum mainnet remains disabled in code and operations.
 
 ## Phase 0: Source and Specification Baseline

@@ -194,7 +194,7 @@ export async function recordVerifiedHouseFunding(input: RecordHouseFundingInput)
 
     const houseOperatingAccountId = await ensureLedgerAccount(client, "house_usdc_operating");
     const externalFundingAccountId = await ensureLedgerAccount(client, "external_house_funding");
-    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) FOR UPDATE", [
+    await client.query("SELECT id FROM ledger_accounts WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", [
       [houseOperatingAccountId, externalFundingAccountId].sort()
     ]);
 

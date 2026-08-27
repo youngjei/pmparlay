@@ -1015,6 +1015,11 @@ export async function getPersistedMarketCatalogPage(options: CatalogReadOptions 
       WHERE eligible_outcomes.snapshot_id = latest_snapshot.snapshot_id
     )`
   ];
+  if (requireFreshOrderBook) {
+    const eligibleOutcomeCount = `(SELECT count(*) FROM eligible_outcomes WHERE eligible_outcomes.snapshot_id = latest_snapshot.snapshot_id)`;
+    filters.push(`${eligibleOutcomeCount} >= 2`);
+    filters.push(`${eligibleOutcomeCount} = jsonb_array_length(COALESCE(latest_snapshot.raw->'outcomes', '[]'::jsonb))`);
+  }
   const candidateFilters: string[] = [];
 
   if (options.search?.trim()) {
@@ -1297,8 +1302,8 @@ export async function getPersistedMarketCatalogPage(options: CatalogReadOptions 
           AND (catalog_outcome.outcome_record->>'bestAsk')::double precision > 0
           AND (catalog_outcome.outcome_record->>'bestAsk')::double precision < 1
           AND jsonb_typeof(catalog_outcome.outcome_record->'executablePrice') = 'number'
-          AND (catalog_outcome.outcome_record->>'executablePrice')::double precision > 0
-          AND (catalog_outcome.outcome_record->>'executablePrice')::double precision < 1
+          AND (catalog_outcome.outcome_record->>'executablePrice')::double precision > 0.01
+          AND (catalog_outcome.outcome_record->>'executablePrice')::double precision < 0.99
           AND jsonb_typeof(catalog_outcome.outcome_record->'requestedNotionalUsd') = 'number'
           AND (catalog_outcome.outcome_record->>'requestedNotionalUsd')::double precision > 0
           AND jsonb_typeof(catalog_outcome.outcome_record->'availableAskNotionalUsd') = 'number'
@@ -1430,12 +1435,11 @@ export async function getPersistedMarketCatalogPage(options: CatalogReadOptions 
   const lastMarketId = marketIdsInOrder[Math.min(marketIdsInOrder.length, limit) - 1];
   const lastCursorRow = lastMarketId ? pageRows.find((row) => row.source_market_id === lastMarketId) : undefined;
 
-  const latestCapturedAt = Math.max(...pageRows.map((row) => row.captured_at.getTime()));
-  const asOf = new Date(latestCapturedAt).toISOString();
-  const latestRows = pageRows.filter((row) => row.captured_at.getTime() === latestCapturedAt);
-  const completeValues = latestRows.map((row) => row.raw.complete).filter((value): value is boolean => typeof value === "boolean");
-  const totalFeedCounts = finiteNumbers(latestRows.map((row) => row.raw.totalFeeds));
-  const successfulFeedCounts = finiteNumbers(latestRows.map((row) => row.raw.successfulFeeds));
+  const oldestCapturedAt = Math.min(...pageRows.map((row) => row.captured_at.getTime()));
+  const asOf = new Date(oldestCapturedAt).toISOString();
+  const completeValues = pageRows.map((row) => row.raw.complete).filter((value): value is boolean => typeof value === "boolean");
+  const totalFeedCounts = finiteNumbers(pageRows.map((row) => row.raw.totalFeeds));
+  const successfulFeedCounts = finiteNumbers(pageRows.map((row) => row.raw.successfulFeeds));
   const marketOrder = new Map<string, number>();
   for (const row of pageRows) {
     if (!marketOrder.has(row.source_market_id)) {
@@ -1556,7 +1560,7 @@ export async function getPersistedMarketCatalogPage(options: CatalogReadOptions 
     totalFeeds: totalFeedCounts.length > 0 ? Math.max(...totalFeedCounts) : undefined,
     successfulFeeds: successfulFeedCounts.length > 0 ? Math.min(...successfulFeedCounts) : undefined,
     nextCursor: publicNextCursor,
-    sweep: latestRows.find((row) => row.raw.sweep)?.raw.sweep,
+    sweep: pageRows.find((row) => row.raw.sweep)?.raw.sweep,
     outcomes,
     groups: [...groupsByKey.values()],
     pageInfo: {

@@ -31,7 +31,8 @@ import {
   activateQuotePaymentWithFinalQuote,
   claimQuotePaymentActivation,
   createQuotePaymentIntent,
-  paymentExposureExceedsLimit
+  paymentExposureExceedsLimit,
+  submitQuotePaymentTransaction
 } from "../db/paymentIntentRepository";
 
 const userId = "00000000-0000-0000-0000-000000000001";
@@ -248,6 +249,76 @@ describe("direct-pay payment intent activation repository", () => {
         limitMicroUsd: boundary
       })
     ).toBe(true);
+  });
+
+  it("keeps a spent generic deposit unbound and makes a late hash submission recoverable", async () => {
+    const txHash = `0x${"c".repeat(64)}`;
+    const depositId = "33333333-3333-3333-3333-333333333333";
+    const submittedIntent = {
+      ...intentRow,
+      status: "submitted",
+      tx_hash: txHash,
+      checkout_ledger_transaction_id: null,
+      amount_received_micro_units: null,
+      surplus_micro_units: null,
+      recovery_reason: "late_submission",
+      recovery_detail: "Transaction hash was submitted after the payment request deadline."
+    };
+    const recoverableIntent = { ...submittedIntent, status: "recoverable" };
+    let recovered = false;
+
+    dbMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql);
+      if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
+      if (text.includes('expires_at <= now() AS "isExpired"')) {
+        return {
+          rows: [
+            recovered
+              ? recoverableIntent
+              : {
+                  ...intentRow,
+                  status: "expired",
+                  tx_hash: null,
+                  checkout_ledger_transaction_id: null,
+                  amount_received_micro_units: null,
+                  surplus_micro_units: null,
+                  recovery_reason: null,
+                  recovery_detail: null
+                }
+          ]
+        };
+      }
+      if (text.includes("SELECT id") && text.includes("id <> $3")) return { rows: [] };
+      if (text.includes("SET\n          tx_hash = $3")) return { rows: [submittedIntent] };
+      if (text.includes("FROM onchain_deposits")) {
+        return { rows: [{ id: depositId, amount_micro_units: "27000000", credited_transaction_id: "deposit-credit" }] };
+      }
+      if (text.includes("INSERT INTO ledger_accounts")) return { rows: [{ id: params?.[1] }] };
+      if (text.includes("id = ANY($1::uuid[])") && text.includes("FOR UPDATE")) return { rows: [] };
+      if (text.includes("COALESCE(sum(amount_micro_units)")) return { rows: [{ balance: "7000000" }] };
+      if (text.includes("status = 'recoverable'")) {
+        recovered = true;
+        return { rows: [recoverableIntent] };
+      }
+      if (text.includes("UPDATE quote_payment_exposure_reservations")) return { rows: [] };
+      if (text.includes("INSERT INTO audit_log")) return { rows: [] };
+      if (text.includes("FROM quote_payment_intents") && text.includes("WHERE id = $1")) {
+        return { rows: [recoverableIntent] };
+      }
+      throw new Error(`unexpected query: ${text}`);
+    });
+
+    const result = await submitQuotePaymentTransaction({ quoteId: "quote-estimate", userId, txHash });
+    const replay = await submitQuotePaymentTransaction({ quoteId: "quote-estimate", userId, txHash });
+
+    expect(result).toMatchObject({ status: "recoverable", recoveryReason: "late_submission", txHash });
+    expect(replay).toMatchObject({ status: "recoverable", recoveryReason: "late_submission", txHash });
+    const accountLock = dbMocks.query.mock.calls.find(([sql]) => String(sql).includes("id = ANY($1::uuid[])"));
+    expect(accountLock?.[1]).toEqual([["user_usdc_available", "user_usdc_checkout"]]);
+    expect(dbMocks.query.mock.calls.filter(([sql]) => String(sql).includes("COALESCE(sum(amount_micro_units)"))).toHaveLength(1);
+    expect(dbMocks.query.mock.calls.some(([sql]) => String(sql).includes("SET payment_intent_id"))).toBe(false);
+    expect(dbMocks.query.mock.calls.some(([sql]) => String(sql).includes("quote payment held for checkout"))).toBe(false);
+    expect(dbMocks.query.mock.calls.filter(([sql]) => String(sql).includes("status = 'recoverable'"))).toHaveLength(1);
   });
 
   it("serializes activation by claiming a confirmed intent with a lease", async () => {

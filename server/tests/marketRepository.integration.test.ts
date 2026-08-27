@@ -60,6 +60,25 @@ function indexedOutcome(marketId: string, volume: number, asOf: string, category
   };
 }
 
+function binaryOutcomes(outcome: MarketOutcome): MarketOutcome[] {
+  const yesPrice = outcome.executablePrice ?? outcome.price;
+  const noPrice = Math.round((1 - yesPrice) * 1000) / 1000;
+  return [
+    outcome,
+    {
+      ...outcome,
+      id: `${outcome.marketId}-no`,
+      tokenId: `${outcome.marketId}-no-token`,
+      outcome: "No",
+      price: noPrice,
+      bestBid: Math.max(0.001, noPrice - 0.01),
+      bestAsk: noPrice,
+      executablePrice: noPrice,
+      vwapPrice: noPrice
+    }
+  ];
+}
+
 function catalog(asOf: string, outcomes: MarketOutcome[], sweep?: MarketCatalogSnapshot["sweep"]): MarketCatalogSnapshot {
   return {
     asOf,
@@ -462,12 +481,13 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     expect(exact.outcomes).toHaveLength(1);
     expect(exact.outcomes[0]).toMatchObject({ id: discoveryOutcome.id, priceSource: "gamma" });
     expect(candidates.outcomes.some((outcome) => outcome.id === discoveryOutcome.id)).toBe(true);
-    const executableOnly = await repository.getPersistedMarketCatalogPage({
-      now: new Date(asOf),
-      requireFreshOrderBook: true,
-      maxSnapshotAgeMs: 60_000
-    });
-    expect(executableOnly.outcomes.some((outcome) => outcome.id === discoveryOutcome.id)).toBe(false);
+    await expect(
+      repository.getPersistedMarketCatalogPage({
+        now: new Date(asOf),
+        requireFreshOrderBook: true,
+        maxSnapshotAgeMs: 60_000
+      })
+    ).rejects.toThrow("No persisted market catalog available");
   });
 
   it("keeps visibility, category, and event grouping pinned across a concurrent refresh", async () => {
@@ -476,7 +496,7 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
       indexedOutcome("snapshot-a", 30_000, firstAsOf),
       indexedOutcome("snapshot-b", 20_000, firstAsOf),
       indexedOutcome("snapshot-c", 10_000, firstAsOf)
-    ];
+    ].flatMap(binaryOutcomes);
     await repository.persistMarketCatalog(catalog(firstAsOf, firstOutcomes));
 
     const firstPage = await repository.getPersistedMarketCatalogPage({ limit: 1, now: new Date(firstAsOf) });
@@ -484,11 +504,14 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
 
     const refreshAsOf = new Date(new Date(firstAsOf).getTime() + 1_000).toISOString();
     await repository.persistMarketCatalog(
-      catalog(refreshAsOf, [
-        indexedOutcome("snapshot-a", 1, refreshAsOf, "Crypto", "refreshed"),
-        indexedOutcome("snapshot-b", 99_000, refreshAsOf, "Crypto", "refreshed"),
-        indexedOutcome("snapshot-c", 98_000, refreshAsOf, "Crypto", "refreshed")
-      ])
+      catalog(
+        refreshAsOf,
+        [
+          indexedOutcome("snapshot-a", 1, refreshAsOf, "Crypto", "refreshed"),
+          indexedOutcome("snapshot-b", 99_000, refreshAsOf, "Crypto", "refreshed"),
+          indexedOutcome("snapshot-c", 98_000, refreshAsOf, "Crypto", "refreshed")
+        ].flatMap(binaryOutcomes)
+      )
     );
 
     const mutableRow = await admin.query(
@@ -520,13 +543,13 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
   it("omits expired legacy public rows while retaining future live rows", async () => {
     const asOf = "2026-07-14T00:00:00.000Z";
     const now = new Date("2026-07-14T00:01:00.000Z");
-    const expired = {
+    const expired = binaryOutcomes({
       ...indexedOutcome("legacy-expired", 20_000, asOf),
       endDate: "2026-07-14T00:00:00.000Z"
-    };
-    const future = indexedOutcome("future-live", 10_000, asOf);
+    });
+    const future = binaryOutcomes(indexedOutcome("future-live", 10_000, asOf));
 
-    await repository.persistMarketCatalog(catalog(asOf, [expired, future]), { now });
+    await repository.persistMarketCatalog(catalog(asOf, [...expired, ...future]), { now });
 
     // Simulate rows written before the ingest cutoff existed: their stored and snapshot visibility are stale.
     await admin.query(`
@@ -544,7 +567,7 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
 
     const page = await repository.getPersistedMarketCatalogPage({ limit: 10, now });
 
-    expect(page.outcomes.map((outcome) => outcome.marketId)).toEqual(["future-live"]);
+    expect([...new Set(page.outcomes.map((outcome) => outcome.marketId))]).toEqual(["future-live"]);
   });
 
   it("reads older discovery candidates for request-time CLOB refresh without treating their prices as fresh", async () => {
@@ -628,12 +651,39 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     expect([...new Set(secondPage.outcomes.map((outcome) => outcome.marketId))]).toEqual(["underfill-valid-b"]);
   });
 
+  it("serves only complete executable binary markets away from the 1-cent boundaries", async () => {
+    const asOf = new Date().toISOString();
+    const valid = indexedOutcome("public-valid-binary", 30_000, asOf);
+    const incomplete = indexedOutcome("public-incomplete-binary", 20_000, asOf);
+    const boundary = {
+      ...indexedOutcome("public-boundary-binary", 10_000, asOf),
+      price: 0.01,
+      bestBid: 0.005,
+      bestAsk: 0.01,
+      executablePrice: 0.01,
+      vwapPrice: 0.01
+    };
+    await repository.persistMarketCatalog(
+      catalog(asOf, [...binaryOutcomes(valid), incomplete, ...binaryOutcomes(boundary)])
+    );
+
+    const page = await repository.getPersistedMarketCatalogPage({
+      search: "public-",
+      now: new Date(asOf),
+      requireFreshOrderBook: true,
+      maxSnapshotAgeMs: 60_000
+    });
+
+    expect([...new Set(page.outcomes.map((outcome) => outcome.marketId))]).toEqual([valid.marketId]);
+    expect(page.outcomes).toHaveLength(2);
+  });
+
   it("keeps maximum-size discovery pages paginated within the database budget", async () => {
     const asOf = new Date().toISOString();
     const prefix = `pagination-boundary-${randomBytes(4).toString("hex")}`;
     const outcomes = Array.from({ length: 251 }, (_, index) =>
       indexedOutcome(`${prefix}-${String(index).padStart(3, "0")}`, 1_000_000 - index, asOf)
-    );
+    ).flatMap(binaryOutcomes);
     await repository.persistMarketCatalog(catalog(asOf, outcomes));
 
     const firstStartedAt = performance.now();
@@ -641,7 +691,7 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
       search: prefix,
       limit: 250,
       sort: "volume",
-      requireFreshOrderBook: false,
+      requireFreshOrderBook: true,
       maxSnapshotAgeMs: 60_000
     });
     const firstLatencyMs = performance.now() - firstStartedAt;
@@ -656,7 +706,7 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
       cursor: first.pageInfo.nextCursor,
       limit: 250,
       sort: "volume",
-      requireFreshOrderBook: false,
+      requireFreshOrderBook: true,
       maxSnapshotAgeMs: 60_000
     });
     expect(new Set(second.outcomes.map((outcome) => outcome.marketId)).size).toBe(1);

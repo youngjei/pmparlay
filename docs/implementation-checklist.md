@@ -64,7 +64,8 @@ For supervised Sepolia, Polygon RPC is intentionally deferred by product decisio
 - [x] Historical 14 Sepolia USDC removed from the Safe.
 - [x] Funded gitignored bot wallet available.
 - [ ] New opening house capital sent to the Safe and recorded from its transaction evidence.
-- [ ] Managed staging hosting, Postgres, Redis, secret storage, and monitoring architecture approved and configured as five Railway services: Postgres, Redis, `legwork-web`, grouped markets/outbox, and grouped financial workers.
+- [x] Managed staging hosting, Postgres, Redis, secret storage, and grouped workers deployed on the approved small-scale Railway topology.
+- [ ] External alerting and managed backup/PITR configured and rehearsed against the deployed Railway environment.
 - [ ] Previously shared Safe API key rotated before any mainnet or public production deployment (explicitly deferred during the supervised friends-and-family Sepolia beta).
 
 ## Deferred Beyond Sprint 4

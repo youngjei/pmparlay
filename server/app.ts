@@ -44,8 +44,7 @@ import {
   type WorkerHeartbeatHealth
 } from "./db/workerHeartbeatRepository";
 import { assertFinancialGateOpen, getFinancialGateDecision } from "./financialGate";
-import { getMarketCatalog, type MarketCatalogGroup, type MarketCatalogPage, type MarketCatalogQuery } from "./marketCatalog";
-import { annotateCatalogOutcomes, marketEligibilityConfigFromEnv } from "./marketTaxonomy";
+import { getMarketCatalog, type MarketCatalogQuery } from "./marketCatalog";
 import { activateConfirmedQuotePayment } from "./paymentActivation";
 import { applyAdditionalRiskChecks, createQuote, getStoredQuote, quoteRequestSchema } from "./quoteService";
 import { createRateLimitOptions } from "./rateLimit";
@@ -131,10 +130,6 @@ const routeRateLimits = {
   withdrawal: { max: 5, timeWindow: "1 minute" },
   ops: { max: 30, timeWindow: "1 minute" }
 } as const;
-
-const MAX_MARKET_PAGE_FILL_ATTEMPTS = 4;
-const PUBLIC_MARKET_MIN_PRICE = 0.01;
-const PUBLIC_MARKET_MAX_PRICE = 0.99;
 
 function hasOpsAccess(authorization?: string) {
   if (!config.OPS_API_KEY) {
@@ -230,62 +225,6 @@ function paymentErrorResponse(message: string, paymentIntent?: QuotePaymentInten
     };
   }
   return undefined;
-}
-
-function publicCatalogWithFreshBooks(catalog: MarketCatalogPage, refreshedOutcomes: MarketCatalogPage["outcomes"], now = new Date()) {
-  const annotatedOutcomes = annotateCatalogOutcomes(refreshedOutcomes, {
-    now,
-    eligibilityConfig: {
-      ...marketEligibilityConfigFromEnv(),
-      requireOrderBook: true
-    }
-  });
-  const marketState = new Map<string, { total: number; eligible: number; blocked: boolean }>();
-
-  for (const outcome of annotatedOutcomes) {
-    const state = marketState.get(outcome.marketId) || { total: 0, eligible: 0, blocked: false };
-    const executablePrice = outcome.executablePrice ?? outcome.price;
-    state.total += 1;
-    if (outcome.eligibility?.eligible !== false) state.eligible += 1;
-    if (
-      outcome.eligibility?.eligible === false ||
-      !Number.isFinite(executablePrice) ||
-      executablePrice <= PUBLIC_MARKET_MIN_PRICE ||
-      executablePrice >= PUBLIC_MARKET_MAX_PRICE
-    ) {
-      state.blocked = true;
-    }
-    marketState.set(outcome.marketId, state);
-  }
-
-  const outcomes = annotatedOutcomes.filter((outcome) => {
-    const state = marketState.get(outcome.marketId);
-    return Boolean(state && !state.blocked && state.total >= 2 && state.eligible === state.total);
-  });
-  const groupsByKey = new Map<string, MarketCatalogGroup & { marketIds: Set<string> }>();
-
-  for (const outcome of outcomes) {
-    if (!outcome.eventGroupKey) continue;
-    const current = groupsByKey.get(outcome.eventGroupKey) || {
-      eventGroupKey: outcome.eventGroupKey,
-      eventTitle: outcome.eventTitle,
-      eventSlug: outcome.eventSlug,
-      category: outcome.category,
-      marketCount: 0,
-      outcomeCount: 0,
-      marketIds: new Set<string>()
-    };
-    current.marketIds.add(outcome.marketId);
-    current.marketCount = current.marketIds.size;
-    current.outcomeCount += 1;
-    groupsByKey.set(outcome.eventGroupKey, current);
-  }
-
-  return {
-    ...catalog,
-    outcomes,
-    groups: [...groupsByKey.values()].map(({ marketIds: _marketIds, ...group }) => group)
-  };
 }
 
 export function buildApp(dependencies: AppDependencies = {}) {
@@ -510,72 +449,16 @@ export function buildApp(dependencies: AppDependencies = {}) {
         eventGroupKey: parsed.eventGroupKey || undefined
       };
       const usePersistedCatalog = Boolean(dependencies.getPersistedMarketCatalogPage) || Boolean(config.DATABASE_URL && config.NODE_ENV !== "test");
-      const shouldRefreshPersistedPage = usePersistedCatalog && (config.NODE_ENV !== "test" || Boolean(dependencies.hydrateQuoteOutcomes));
-      let catalog: Awaited<ReturnType<typeof loadMarketCatalog>> | MarketCatalogPage;
-
-      if (shouldRefreshPersistedPage) {
-        const requestedLimit = query.limit || 48;
-        const publicOutcomes: MarketCatalogPage["outcomes"] = [];
-        const publicMarketIds = new Set<string>();
-        let cursor = query.cursor;
-        let lastCandidatePage: MarketCatalogPage | undefined;
-
-        for (let attempt = 0; attempt < MAX_MARKET_PAGE_FILL_ATTEMPTS; attempt += 1) {
-          const remaining = requestedLimit - publicMarketIds.size;
-          if (remaining <= 0) break;
-
-          const candidatePage = await loadPersistedMarketCatalogPage({
+      const catalog = usePersistedCatalog
+        ? await loadPersistedMarketCatalogPage({
             ...query,
-            cursor,
-            limit: remaining,
-            requireFreshOrderBook: false,
-            maxSnapshotAgeMs: config.MARKET_CATALOG_HARD_MAX_AGE_MS
-          });
-          lastCandidatePage = candidatePage;
-
-          if (candidatePage.outcomes.length > 0) {
-            const refreshed = await refreshQuoteOutcomes(candidatePage.outcomes, controller.signal, {
-              requestedNotionalUsd: 25,
-              retainUnexecutable: true,
-              requireExplicitLifecycle: true
-            });
-            if (!refreshed.complete) {
-              reply.status(503);
-              return {
-                error: "market_prices_unavailable",
-                detail: "LEGWORK could not verify current Polymarket order books for this market page."
-              };
-            }
-
-            const publicPage = publicCatalogWithFreshBooks(candidatePage, refreshed.outcomes);
-            for (const outcome of publicPage.outcomes) {
-              publicOutcomes.push(outcome);
-              publicMarketIds.add(outcome.marketId);
-            }
-          }
-
-          cursor = candidatePage.pageInfo.nextCursor;
-          if (!candidatePage.pageInfo.hasMore || !cursor) break;
-        }
-
-        if (!lastCandidatePage) {
-          throw new Error("No persisted market catalog page was returned");
-        }
-
-        const publicCatalog = publicCatalogWithFreshBooks(lastCandidatePage, publicOutcomes);
-        publicCatalog.nextCursor = lastCandidatePage.pageInfo.nextCursor;
-        publicCatalog.pageInfo = {
-          ...lastCandidatePage.pageInfo,
-          limit: requestedLimit,
-          offset: 0,
-          total: undefined
-        };
-        catalog = publicCatalog;
-      } else {
-        catalog = usePersistedCatalog
-          ? await loadPersistedMarketCatalogPage(query)
-          : await loadMarketCatalog(config.MARKET_CACHE_TTL_MS, controller.signal);
-      }
+            requireFreshOrderBook: true,
+            maxSnapshotAgeMs: Math.min(
+              config.MARKET_CATALOG_HARD_MAX_AGE_MS,
+              Math.max(config.MARKET_CATALOG_MAX_AGE_MS, config.MARKET_INDEX_INTERVAL_MS * 2)
+            )
+          })
+        : await loadMarketCatalog(config.MARKET_CACHE_TTL_MS, controller.signal);
       reply.header("cache-control", "private, max-age=30, stale-while-revalidate=30");
       return catalog;
     } catch (error) {

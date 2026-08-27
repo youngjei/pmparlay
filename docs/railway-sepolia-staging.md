@@ -19,7 +19,9 @@ Create the Railway services `Postgres` and `Redis`, then create these repository
 
 This five-service layout is the approved small-scale staging topology. Before mainnet, upgrade Railway capacity and replace the two grouped worker services with five isolated worker services: market indexer, deposits, reconciliation, settlements, and outbox. Keep the public web/API, Postgres, and Redis as separate services.
 
-Railway automatically detects the root `Dockerfile`. Run `npm run db:migrate && npm run db:backfill-settlement-identities` as the `legwork-web` pre-deploy command. The grouped commands must run as one replica each. Use `/readyz` as the web health check: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all four required worker roles are healthy. `/healthz` is only a process-liveness check.
+Railway automatically detects the root `Dockerfile`. Run `npm run db:migrate && npm run db:backfill-settlement-identities` as the `legwork-web` pre-deploy command. The grouped commands must run as one replica each. Use `/healthz` as Railway's deployment health check so web deployment does not depend circularly on workers starting first. Monitor `/readyz` separately as the release gate: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all four required worker roles are healthy.
+
+Run `npm run staging:qa:managed` inside the Railway web service for the migration-manifest, managed Postgres/Redis, Sepolia Safe, settlement quarantine, and financial-gate release check. The `--managed` path accepts only non-loopback Postgres and Redis targets; the Sepolia chain, Circle test-USDC contract, Safe owner, and threshold checks remain mandatory.
 
 Because the repository is private, grant the Railway GitHub App access to `youngjei/pmparlay` before enabling automatic deployments from `main`. `railway up` remains the manual deployment path while that permission is absent; do not replace the GitHub App permission with a personal access token stored in the repository.
 
@@ -64,6 +66,7 @@ Use these catalog controls on the grouped market service for the free staging fo
 MARKET_CATALOG_MIN_LIQUIDITY_USD=10000
 MARKET_CATALOG_MIN_VOLUME_USD=50000
 MARKET_SNAPSHOT_UNREFERENCED_RETENTION=2
+MARKET_INDEX_JOB_TIMEOUT_MS=300000
 ```
 
 `MARKET_SNAPSHOT_UNREFERENCED_RETENTION` belongs only on `legwork-markets`. Keep at least two snapshots so pagination cursors survive an index refresh. It may be raised after Railway storage is upgraded, but quote- and ticket-referenced snapshots remain immutable regardless of this setting.

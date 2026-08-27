@@ -12,6 +12,7 @@ import { getSettlementIdentityQuarantineSummary } from "./db/settlementRepositor
 import { processFinancialReconciliation } from "./workers/reconciliationWorker";
 
 const requireOpen = process.argv.includes("--require-open");
+const managedRuntime = process.argv.includes("--managed");
 const financialTables = [
   "users",
   "quotes",
@@ -32,6 +33,28 @@ export function assertIsolatedStagingTargets(databaseUrl: string | undefined, re
   if (!redisLoopback || redis.pathname !== "/1") throw new Error("staging_redis_target_mismatch");
 }
 
+export function assertManagedStagingTargets(databaseUrl: string | undefined, redisUrl: string) {
+  if (!databaseUrl) throw new Error("staging_database_url_missing");
+  const database = new URL(databaseUrl);
+  const redis = new URL(redisUrl);
+  const databaseLoopback = ["127.0.0.1", "localhost", "::1"].includes(database.hostname);
+  const redisLoopback = ["127.0.0.1", "localhost", "::1"].includes(redis.hostname);
+  if (!["postgres:", "postgresql:"].includes(database.protocol) || database.pathname === "/" || databaseLoopback) {
+    throw new Error("staging_managed_database_target_mismatch");
+  }
+  if (!["redis:", "rediss:"].includes(redis.protocol) || redisLoopback) {
+    throw new Error("staging_managed_redis_target_mismatch");
+  }
+}
+
+function assertStagingTargets(databaseUrl: string | undefined, redisUrl: string) {
+  if (managedRuntime) {
+    assertManagedStagingTargets(databaseUrl, redisUrl);
+    return;
+  }
+  assertIsolatedStagingTargets(databaseUrl, redisUrl);
+}
+
 export function assertMigrationManifest(
   applied: Array<{ name: string; checksum: string | null }>,
   current: Array<{ name: string; checksum: string }>
@@ -46,7 +69,7 @@ export function assertMigrationManifest(
 }
 
 async function verifyDatabase() {
-  assertIsolatedStagingTargets(config.DATABASE_URL, config.REDIS_URL);
+  assertStagingTargets(config.DATABASE_URL, config.REDIS_URL);
   const client = new pg.Client({ connectionString: config.DATABASE_URL });
   await client.connect();
   try {
@@ -151,7 +174,7 @@ async function verifyOnchainConfiguration() {
 }
 
 export async function runSepoliaStagingQa() {
-  assertIsolatedStagingTargets(config.DATABASE_URL, config.REDIS_URL);
+  assertStagingTargets(config.DATABASE_URL, config.REDIS_URL);
   const [database, onchain, quarantine] = await Promise.all([
     verifyDatabase(),
     verifyOnchainConfiguration(),

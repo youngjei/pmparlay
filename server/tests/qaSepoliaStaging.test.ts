@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertIsolatedStagingTargets, assertMigrationManifest } from "../qaSepoliaStaging";
+import { assertIsolatedStagingTargets, assertManagedStagingTargets, assertMigrationManifest } from "../qaSepoliaStaging";
 
 describe("Sepolia staging runtime target guard", () => {
   it("accepts only the dedicated database and loopback Redis database 1", () => {
@@ -28,5 +28,20 @@ describe("Sepolia staging runtime target guard", () => {
     expect(() => assertMigrationManifest([{ name: "0001.sql", checksum: "changed" }, current[1]], current)).toThrow(
       "staging_migration_checksum_mismatch:0001.sql"
     );
+  });
+
+  it("accepts explicit managed Postgres and Redis targets without weakening the local guard", () => {
+    expect(() =>
+      assertManagedStagingTargets(
+        "postgres://legwork:pass@postgres.railway.internal:5432/railway",
+        "redis://default:pass@redis.railway.internal:6379"
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertManagedStagingTargets("postgres://localhost/legwork_sepolia_staging", "redis://redis.internal:6379")
+    ).toThrow("staging_managed_database_target_mismatch");
+    expect(() =>
+      assertManagedStagingTargets("postgres://postgres.internal/railway", "redis://127.0.0.1:6379/1")
+    ).toThrow("staging_managed_redis_target_mismatch");
   });
 });

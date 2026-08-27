@@ -40,6 +40,8 @@ const marketPageSize = 48;
 const claimableTicketPageSize = 50;
 const maxClaimableTicketPages = 200;
 const marketCatalogStaleAfterMs = 30_000;
+const marketViewCacheTtlMs = 2 * 60_000;
+const marketViewCacheMaxEntries = 24;
 const sortOptions = [
   { value: "volume", label: "Highest volume" },
   { value: "ending_soon", label: "Ending soon" },
@@ -87,6 +89,16 @@ type PaginationIssue = {
   kind: "duplicate" | "malformed" | "request";
   message: string;
   cursor: string;
+};
+
+type MarketViewCacheEntry = {
+  catalog: MarketCatalog;
+  outcomes: MarketOutcome[];
+  nextCursor?: string;
+  hasMore: boolean;
+  total?: number;
+  fetchState: FetchState;
+  storedAt: number;
 };
 
 type ServerQuote = {
@@ -948,6 +960,7 @@ export default function App({ auth }: AppProps = {}) {
   const lastPayoutRef = useRef<string | null>(null);
   const marketGenerationRef = useRef(0);
   const marketFingerprintRef = useRef("");
+  const marketViewCacheRef = useRef(new Map<string, MarketViewCacheEntry>());
   const marketRequestControllerRef = useRef<AbortController | null>(null);
   const activeAppendCursorRef = useRef<string | undefined>(undefined);
   const consumedMarketCursorsRef = useRef<Set<string>>(new Set());
@@ -1182,6 +1195,32 @@ export default function App({ auth }: AppProps = {}) {
           Boolean(nextCursor && (nextCursor === cursor || consumedMarketCursorsRef.current.has(nextCursor)));
 
         if (mode === "append" && cursor) consumedMarketCursorsRef.current.add(cursor);
+        const nextFetchState =
+          catalog.complete === false || (catalogAge !== undefined && catalogAge > marketCatalogStaleAfterMs)
+            ? "fallback"
+            : "live";
+        if (mode === "reset") {
+          const refreshedById = new Map(freshOutcomes.map((outcome) => [outcome.id, outcome]));
+          setLegs((current) => {
+            let changed = false;
+            const next = current.map((leg) => {
+              const refreshed = refreshedById.get(leg.id);
+              if (
+                !refreshed ||
+                (refreshed.sourceAsOf === leg.sourceAsOf &&
+                  refreshed.orderbookTimestamp === leg.orderbookTimestamp &&
+                  refreshed.price === leg.price &&
+                  refreshed.executablePrice === leg.executablePrice &&
+                  refreshed.availableAskNotionalUsd === leg.availableAskNotionalUsd)
+              ) {
+                return leg;
+              }
+              changed = true;
+              return { ...refreshed, addedAt: leg.addedAt };
+            });
+            return changed ? next : current;
+          });
+        }
         setMarketCatalog(catalog);
         setOutcomes((current) => {
           if (mode === "reset") return freshOutcomes;
@@ -1193,11 +1232,26 @@ export default function App({ auth }: AppProps = {}) {
         setNextMarketCursor(nextCursor);
         setMarketHasMore(serverHasMore && !malformedPagination && !duplicateCursor);
         setMarketTotal((current) => catalog.pageInfo?.total ?? current);
-        setFetchState(
-          catalog.complete === false || (catalogAge !== undefined && catalogAge > marketCatalogStaleAfterMs)
-            ? "fallback"
-            : "live"
-        );
+        setFetchState(nextFetchState);
+
+        if (mode === "reset") {
+          const cache = marketViewCacheRef.current;
+          cache.delete(fingerprint);
+          cache.set(fingerprint, {
+            catalog,
+            outcomes: freshOutcomes,
+            nextCursor,
+            hasMore: serverHasMore && !malformedPagination && !duplicateCursor,
+            total: catalog.pageInfo?.total,
+            fetchState: nextFetchState,
+            storedAt: Date.now()
+          });
+          while (cache.size > marketViewCacheMaxEntries) {
+            const oldestKey = cache.keys().next().value;
+            if (!oldestKey) break;
+            cache.delete(oldestKey);
+          }
+        }
 
         if (malformedPagination) {
           setPaginationIssue({
@@ -1218,13 +1272,19 @@ export default function App({ auth }: AppProps = {}) {
         if (!requestIsCurrent()) return;
         const message = error instanceof Error ? error.message : "Live market catalog unavailable.";
         if (mode === "reset") {
-          setMarketCatalog(null);
-          setOutcomes([]);
-          setNextMarketCursor(undefined);
-          setMarketHasMore(false);
-          setMarketTotal(undefined);
-          setFetchState("error");
-          setMarketError(message);
+          const cached = marketViewCacheRef.current.get(fingerprint);
+          if (cached) {
+            setFetchState("fallback");
+            setMarketError(`Could not refresh markets. ${message}`);
+          } else {
+            setMarketCatalog(null);
+            setOutcomes([]);
+            setNextMarketCursor(undefined);
+            setMarketHasMore(false);
+            setMarketTotal(undefined);
+            setFetchState("error");
+            setMarketError(message);
+          }
         } else if (cursor) {
           setMarketHasMore(false);
           setPaginationIssue({
@@ -1250,12 +1310,24 @@ export default function App({ auth }: AppProps = {}) {
     marketFingerprintRef.current = currentMarketFingerprint;
     activeAppendCursorRef.current = undefined;
     consumedMarketCursorsRef.current = new Set();
-    setFetchState("loading");
-    setOutcomes([]);
-    setMarketCatalog(null);
-    setNextMarketCursor(undefined);
-    setMarketHasMore(false);
-    setMarketTotal(undefined);
+    const cached = marketViewCacheRef.current.get(currentMarketFingerprint);
+    const cacheIsUsable = Boolean(cached && Date.now() - cached.storedAt <= marketViewCacheTtlMs);
+    if (cached && cacheIsUsable) {
+      setFetchState(cached.fetchState);
+      setOutcomes(cached.outcomes);
+      setMarketCatalog(cached.catalog);
+      setNextMarketCursor(cached.nextCursor);
+      setMarketHasMore(cached.hasMore);
+      setMarketTotal(cached.total);
+    } else {
+      if (cached) marketViewCacheRef.current.delete(currentMarketFingerprint);
+      setFetchState("loading");
+      setOutcomes([]);
+      setMarketCatalog(null);
+      setNextMarketCursor(undefined);
+      setMarketHasMore(false);
+      setMarketTotal(undefined);
+    }
     setLoadingMoreMarkets(false);
     setMarketError("");
     setPaginationIssue(null);
@@ -1589,6 +1661,18 @@ export default function App({ auth }: AppProps = {}) {
           : quoteUnavailable
             ? "Quote unavailable"
           : `${payoutDisplay} potential`;
+  const mobileBasketAction =
+    legs.length === 0
+      ? "Add 2 picks"
+      : legs.length === 1
+        ? "Add 1 pick"
+        : !hasBuyAmount
+          ? "Add amount"
+          : risk.decision === "reject"
+            ? "Unavailable"
+            : auth?.enabled && !auth.authenticated
+              ? "Connect"
+              : "Review";
   const basketPriceDisplay = hasBasketQuote
     ? quoteUnavailable
       ? "Unavailable"
@@ -3727,6 +3811,7 @@ export default function App({ auth }: AppProps = {}) {
         onClick={openMobileBasket}
         aria-expanded={mobileBasketOpen}
         aria-controls="mobile-basket-dialog"
+        aria-label={`Open basket: ${legs.length} selected. ${mobileBasketAction}.`}
         aria-hidden={mobileBasketOpen || paymentModalOpen ? true : undefined}
         inert={mobileBasketOpen || paymentModalOpen ? true : undefined}
       >
@@ -3735,17 +3820,7 @@ export default function App({ auth }: AppProps = {}) {
           <AnimatedPayout value={mobilePayoutDisplay} burstKey={burstKey} className="mobile-payout-value" compact />
         </div>
         <span className={canUseCheckoutAction ? "mobile-review ready" : "mobile-review"}>
-          {legs.length === 0
-            ? "Add 2 picks"
-            : legs.length === 1
-              ? "Add 1 pick"
-              : !hasBuyAmount
-                ? "Add amount"
-                : risk.decision === "reject"
-                  ? "Unavailable"
-                  : auth?.enabled && !auth.authenticated
-                    ? "Connect"
-                    : "Review"}
+          {mobileBasketAction}
         </span>
       </button>
       ) : null}

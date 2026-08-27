@@ -11,7 +11,7 @@ try {
   const page = await getPersistedMarketCatalogPage({
     limit,
     sort: "volume",
-    requireFreshOrderBook: false,
+    requireFreshOrderBook: true,
     maxSnapshotAgeMs: 6 * 60 * 60_000
   });
   const firstPageDatabaseLatencyMs = Math.round(performance.now() - startedAt);
@@ -32,7 +32,7 @@ try {
     cursor: page.pageInfo.nextCursor,
     limit,
     sort: "volume",
-    requireFreshOrderBook: false,
+    requireFreshOrderBook: true,
     maxSnapshotAgeMs: 6 * 60 * 60_000
   });
   const secondPageDatabaseLatencyMs = Math.round(performance.now() - secondPageStartedAt);

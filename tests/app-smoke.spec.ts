@@ -484,6 +484,31 @@ test("mobile guidance progresses from zero picks through a priced basket", async
   await expect(page.locator(".mobile-basket-sheet .mobile-payout-value")).toContainText("potential");
 });
 
+for (const width of [320, 390]) {
+  test(`mobile basket bar stays inside a ${width}px viewport`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/");
+    await page.getByLabel("Search markets").fill("Up or Down");
+    await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
+
+    const bar = page.locator(".mobile-basket-bar");
+    const summary = bar.locator(":scope > div");
+    const cta = bar.locator(".mobile-review");
+    const [metrics, summaryBox, ctaBox] = await Promise.all([
+      bar.evaluate((element) => ({ scrollWidth: element.scrollWidth, clientWidth: element.clientWidth })),
+      summary.boundingBox(),
+      cta.boundingBox()
+    ]);
+
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
+    expect(summaryBox).not.toBeNull();
+    expect(ctaBox).not.toBeNull();
+    expect(ctaBox!.x + ctaBox!.width).toBeLessThanOrEqual(width);
+    expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(ctaBox!.x - 8);
+    await expect(bar).toHaveAttribute("aria-label", /Open basket: 1 selected\./);
+  });
+}
+
 test("tablet and short desktop keep basket review controls in reach", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 720 });
   await page.goto("/");

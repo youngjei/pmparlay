@@ -109,6 +109,11 @@ function hashJson(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function compactSnapshotRecord<T extends PersistedMarketRecord>(record: T): Omit<T, "eligibility" | "sourceAsOf"> {
+  const { eligibility: _eligibility, sourceAsOf: _sourceAsOf, ...stableRecord } = record;
+  return stableRecord;
+}
+
 function unreferencedSnapshotRetentionFromEnv() {
   const configured = process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
   if (configured === undefined || configured.trim() === "") return 2;
@@ -418,69 +423,74 @@ async function upsertOutcome(client: pg.PoolClient, marketId: string, outcome: M
   );
 }
 
+async function writeSnapshot(
+  client: pg.PoolClient,
+  input: {
+    marketId: string;
+    capturedAt: string;
+    volumeMicroUsd: number | null;
+    liquidityMicroUsd: number | null;
+    raw: Record<string, unknown>;
+  }
+) {
+  await client.query(
+    `
+      INSERT INTO market_snapshots (
+        market_id,
+        captured_at,
+        source_response_hash,
+        volume_micro_usd,
+        liquidity_micro_usd,
+        raw
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `,
+    [input.marketId, input.capturedAt, hashJson(input.raw), input.volumeMicroUsd, input.liquidityMicroUsd, input.raw]
+  );
+}
+
 async function insertSnapshot(client: pg.PoolClient, marketId: string, group: MarketGroup, catalog: MarketCatalogSnapshot) {
   const primary = group.outcomes[0];
   const publiclyVisible = group.outcomes.some((outcome) => outcome.eligibility?.eligible === true);
   const raw = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     marketId: group.marketId,
-    market: primary,
-    outcomes: group.outcomes,
+    outcomes: group.outcomes.map((outcome) => compactSnapshotRecord(outcome)),
     publiclyVisible,
-    capturedAt: catalog.asOf,
     complete: catalog.complete,
     totalFeeds: catalog.totalFeeds,
-    successfulFeeds: catalog.successfulFeeds,
-    nextCursor: catalog.nextCursor,
-    sweep: catalog.sweep
+    successfulFeeds: catalog.successfulFeeds
   };
 
-  await client.query(
-    `
-      INSERT INTO market_snapshots (
-        market_id,
-        captured_at,
-        source_response_hash,
-        volume_micro_usd,
-        liquidity_micro_usd,
-        raw
-      )
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `,
-    [marketId, catalog.asOf, hashJson(raw), microUsd(primary.volume), microUsd(primary.liquidity), raw]
-  );
+  return writeSnapshot(client, {
+    marketId,
+    capturedAt: catalog.asOf,
+    volumeMicroUsd: microUsd(primary.volume),
+    liquidityMicroUsd: microUsd(primary.liquidity),
+    raw
+  });
 }
 
 async function insertTombstoneSnapshot(client: pg.PoolClient, marketId: string, tombstone: PersistedMarketRecord, catalog: MarketCatalogSnapshot) {
   const raw = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     marketId: tombstone.marketId,
-    market: tombstone,
+    market: compactSnapshotRecord(tombstone),
     outcomes: [],
     publiclyVisible: false,
     visibilityReason: "explicit_source_tombstone",
-    capturedAt: catalog.asOf,
     complete: catalog.complete,
     totalFeeds: catalog.totalFeeds,
-    successfulFeeds: catalog.successfulFeeds,
-    nextCursor: catalog.nextCursor,
-    sweep: catalog.sweep
+    successfulFeeds: catalog.successfulFeeds
   };
 
-  await client.query(
-    `
-      INSERT INTO market_snapshots (
-        market_id,
-        captured_at,
-        source_response_hash,
-        volume_micro_usd,
-        liquidity_micro_usd,
-        raw
-      )
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `,
-    [marketId, catalog.asOf, hashJson(raw), microUsd(tombstone.volume), microUsd(tombstone.liquidity), raw]
-  );
+  return writeSnapshot(client, {
+    marketId,
+    capturedAt: catalog.asOf,
+    volumeMicroUsd: microUsd(tombstone.volume),
+    liquidityMicroUsd: microUsd(tombstone.liquidity),
+    raw
+  });
 }
 
 async function pruneUnreferencedMarketSnapshots(client: pg.PoolClient, marketIds: string[]) {
@@ -795,6 +805,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
     .map((tombstone) => tombstoneRecord(tombstone, catalog));
   let missingMarketsMarkedNonPublic = 0;
   let markedMissingMarketsNonPublic = false;
+  let snapshotsInserted = 0;
   const touchedMarketIds: string[] = [];
 
   try {
@@ -880,6 +891,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
         await upsertOutcome(client, marketId, outcome);
       }
       await insertSnapshot(client, marketId, group, catalog);
+      snapshotsInserted += 1;
     }
 
     for (const tombstone of knownTombstones) {
@@ -887,6 +899,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
       const marketId = await upsertMarket(client, tombstone, false, catalog.asOf);
       touchedMarketIds.push(marketId);
       await insertTombstoneSnapshot(client, marketId, tombstone, catalog);
+      snapshotsInserted += 1;
     }
 
     if (sweepState.reconcileMarketIds.length > 0) {
@@ -920,8 +933,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
               'visibilityReason', CASE
                 WHEN hidden_markets.end_date <= $3::timestamptz THEN 'expired_at_complete_sweep'
                 ELSE 'missing_from_complete_sweep'
-              END,
-              'capturedAt', $2::text
+              END
             ))::text, 'sha256'), 'hex'),
             latest_snapshot.volume_micro_usd,
             latest_snapshot.liquidity_micro_usd,
@@ -930,8 +942,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
               'visibilityReason', CASE
                 WHEN hidden_markets.end_date <= $3::timestamptz THEN 'expired_at_complete_sweep'
                 ELSE 'missing_from_complete_sweep'
-              END,
-              'capturedAt', $2::text
+              END
             )
           FROM hidden_markets
           JOIN LATERAL (
@@ -946,6 +957,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
         [sweepState.reconcileMarketIds, catalog.asOf, now.toISOString()]
       );
       missingMarketsMarkedNonPublic = missingResult.rowCount || 0;
+      snapshotsInserted += missingMarketsMarkedNonPublic;
       touchedMarketIds.push(...missingResult.rows.map((row) => row.market_id));
       markedMissingMarketsNonPublic = true;
     }
@@ -957,7 +969,7 @@ export async function persistMarketCatalog(catalog: MarketCatalogSnapshot, optio
     return {
       markets: groupsToPersist.length + knownTombstones.length,
       outcomes: groupsToPersist.reduce((count, group) => count + group.outcomes.length, 0),
-      snapshots: groupsToPersist.length + knownTombstones.length,
+      snapshots: snapshotsInserted,
       snapshotsPruned,
       deactivatedMissingMarkets: false,
       markedMissingMarketsNonPublic,

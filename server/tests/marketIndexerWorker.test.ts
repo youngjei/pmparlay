@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   persistCatalog: vi.fn(),
   getSweepState: vi.fn(),
   resetInvalidCursor: vi.fn(),
+  assertStorageHeadroom: vi.fn(),
   markWorkerSuccess: vi.fn(),
   markWorkerFailure: vi.fn()
 }));
@@ -49,6 +50,7 @@ vi.mock("../db/marketRepository", () => ({
   persistMarketCatalog: mocks.persistCatalog,
   resetMarketCatalogSweepAfterInvalidCursor: mocks.resetInvalidCursor
 }));
+vi.mock("../db/storageRepository", () => ({ assertMarketIndexStorageHeadroom: mocks.assertStorageHeadroom }));
 vi.mock("../marketCatalog", () => ({ fetchLiveMarketCatalog: mocks.fetchCatalog }));
 vi.mock("../workers/heartbeat", () => ({ startWorkerHeartbeat: () => vi.fn() }));
 vi.mock("../db/workerHeartbeatRepository", () => ({
@@ -69,6 +71,7 @@ beforeEach(() => {
   mocks.getJob.mockResolvedValue(undefined);
   mocks.add.mockResolvedValue({ id: "market-indexer-polymarket" });
   mocks.upsertJobScheduler.mockResolvedValue({ id: "scheduler-trigger" });
+  mocks.assertStorageHeadroom.mockResolvedValue({ usedBytes: 1 });
 });
 
 describe("market indexer job deduplication", () => {
@@ -126,6 +129,16 @@ describe("market indexer job deduplication", () => {
       })
     );
     expect(mocks.persistCatalog).toHaveBeenCalledWith(catalog, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(mocks.assertStorageHeadroom).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call Polymarket when database storage has reached its soft limit", async () => {
+    mocks.assertStorageHeadroom.mockRejectedValue(new Error("market_index_storage_soft_limit_exceeded:350000000:350000000"));
+
+    await expect(indexMarketCatalogOnce()).rejects.toThrow("market_index_storage_soft_limit_exceeded");
+
+    expect(mocks.fetchCatalog).not.toHaveBeenCalled();
+    expect(mocks.persistCatalog).not.toHaveBeenCalled();
   });
 
   it("resets an expired durable cursor and retries from the first page", async () => {

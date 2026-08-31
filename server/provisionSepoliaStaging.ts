@@ -155,6 +155,7 @@ async function writeStagingEnvironment(input: {
     OPS_API_KEY: process.env.OPS_API_KEY || input.existing.OPS_API_KEY || randomBytes(32).toString("hex"),
     MARKET_INDEX_MAX_PAGES: 1,
     MARKET_INDEX_INTERVAL_MS: 60_000,
+    MARKET_INDEX_DB_SOFT_LIMIT_BYTES: 350_000_000,
     WORKER_HEARTBEAT_MAX_AGE_MS: 45_000,
     WORKER_SUCCESS_MAX_AGE_MS: 180_000
   };

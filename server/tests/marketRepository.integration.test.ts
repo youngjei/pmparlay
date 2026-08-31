@@ -383,6 +383,34 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     expect(snapshots.rows[0].count).toBe(2);
   });
 
+  it("keeps both identical B revisions immutable after an A/B/B sequence", async () => {
+    const sourceAsOf = new Date().toISOString();
+    const firstOutcome = indexedOutcome("immutable-snapshot", 10_000, sourceAsOf, "Politics", "revision-a");
+    const secondOutcome = indexedOutcome("immutable-snapshot", 11_000, sourceAsOf, "Politics", "revision-b");
+    const first = new Date(Date.now() + 10_000).toISOString();
+    const second = new Date(Date.now() + 11_000).toISOString();
+    const third = new Date(Date.now() + 12_000).toISOString();
+
+    await repository.persistMarketCatalog(catalog(first, [firstOutcome]));
+    await repository.persistMarketCatalog(catalog(second, [secondOutcome]));
+    const result = await repository.persistMarketCatalog(catalog(third, [secondOutcome]));
+
+    const snapshots = await admin.query(
+      `
+        SELECT captured_at, source_response_hash
+        FROM "${schema}".market_snapshots
+        JOIN "${schema}".markets ON markets.id = market_snapshots.market_id
+        WHERE markets.source_market_id = 'immutable-snapshot'
+        ORDER BY market_snapshots.catalog_sequence ASC
+      `
+    );
+
+    expect(result).toMatchObject({ snapshots: 1 });
+    expect(snapshots.rows).toHaveLength(2);
+    expect(snapshots.rows.map((row) => row.captured_at.toISOString())).toEqual([second, third]);
+    expect(snapshots.rows[0].source_response_hash).toBe(snapshots.rows[1].source_response_hash);
+  });
+
   it("honors the bounded MARKET_SNAPSHOT_UNREFERENCED_RETENTION override", async () => {
     const originalRetention = process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION;
     process.env.MARKET_SNAPSHOT_UNREFERENCED_RETENTION = "3";

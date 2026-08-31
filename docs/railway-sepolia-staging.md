@@ -67,9 +67,10 @@ MARKET_CATALOG_MIN_LIQUIDITY_USD=10000
 MARKET_CATALOG_MIN_VOLUME_USD=50000
 MARKET_SNAPSHOT_UNREFERENCED_RETENTION=2
 MARKET_INDEX_JOB_TIMEOUT_MS=300000
+MARKET_INDEX_DB_SOFT_LIMIT_BYTES=350000000
 ```
 
-`MARKET_SNAPSHOT_UNREFERENCED_RETENTION` belongs only on `legwork-markets`. Keep at least two snapshots so pagination cursors survive an index refresh. It may be raised after Railway storage is upgraded, but quote- and ticket-referenced snapshots remain immutable regardless of this setting.
+`MARKET_SNAPSHOT_UNREFERENCED_RETENTION` belongs only on `legwork-markets`. Keep at least two snapshots so pagination cursors survive an index refresh. Quote- and ticket-referenced snapshots remain immutable regardless of this setting. `MARKET_INDEX_DB_SOFT_LIMIT_BYTES` stops catalog writes before the free 500 MB Railway volume is exhausted; raise it only after increasing the database volume.
 
 `SAFE_API_KEY` is optional because LEGWORK does not automate Safe signing or broadcast. If it is configured for read-only Safe metadata, keep it backend-only and never prefix it with `VITE_`.
 

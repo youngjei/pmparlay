@@ -730,8 +730,8 @@ export async function prepareTicketSettlementIdentities(
           CASE
             WHEN pg_input_is_valid(snapshot_outcome.value->>'endDate', 'timestamp with time zone')
               THEN (snapshot_outcome.value->>'endDate')::timestamptz
-            WHEN pg_input_is_valid(market_snapshots.raw->'market'->>'endDate', 'timestamp with time zone')
-              THEN (market_snapshots.raw->'market'->>'endDate')::timestamptz
+            WHEN pg_input_is_valid(COALESCE(market_snapshots.raw->'market', market_snapshots.raw->'outcomes'->0)->>'endDate', 'timestamp with time zone')
+              THEN (COALESCE(market_snapshots.raw->'market', market_snapshots.raw->'outcomes'->0)->>'endDate')::timestamptz
             ELSE NULL
           END AS settlement_due_at
         FROM ticket_legs

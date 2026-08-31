@@ -6,6 +6,7 @@ import {
   resetMarketCatalogSweepAfterInvalidCursor
 } from "../db/marketRepository";
 import { markWorkerFailure, markWorkerSuccess } from "../db/workerHeartbeatRepository";
+import { assertMarketIndexStorageHeadroom } from "../db/storageRepository";
 import { fetchLiveMarketCatalog } from "../marketCatalog";
 import { isPolymarketInvalidCursorError } from "../../src/marketData";
 import { redisConnectionOptions } from "../queues/connection";
@@ -97,12 +98,14 @@ export async function indexMarketCatalogOnce(
     persistCatalog?: typeof persistMarketCatalog;
     getSweepState?: typeof getMarketCatalogSweepState;
     resetInvalidCursor?: typeof resetMarketCatalogSweepAfterInvalidCursor;
+    assertStorageHeadroom?: typeof assertMarketIndexStorageHeadroom;
   } = {}
 ) {
   const fetchCatalog = dependencies.fetchCatalog || fetchLiveMarketCatalog;
   const persistCatalog = dependencies.persistCatalog || persistMarketCatalog;
   const getSweepState = dependencies.getSweepState || getMarketCatalogSweepState;
   const resetInvalidCursor = dependencies.resetInvalidCursor || resetMarketCatalogSweepAfterInvalidCursor;
+  const assertStorageHeadroom = dependencies.assertStorageHeadroom || assertMarketIndexStorageHeadroom;
   const controller = new AbortController();
   const timeoutMs = marketIndexJobTimeoutMs();
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -115,6 +118,7 @@ export async function indexMarketCatalogOnce(
   });
 
   const work = (async () => {
+    await assertStorageHeadroom();
     const sweepState = await getSweepState().catch(() => undefined);
     const afterCursor = process.env.MARKET_INDEX_AFTER_CURSOR || sweepState?.nextCursor;
     const fetchPage = (cursor: string | undefined, expectedGenerationVersion: number) =>
@@ -138,6 +142,7 @@ export async function indexMarketCatalogOnce(
       catalog = await fetchPage(undefined, resetGenerationVersion);
     }
     if (controller.signal.aborted) throw controller.signal.reason;
+    await assertStorageHeadroom();
     return persistCatalog(catalog, { signal: controller.signal });
   })();
 

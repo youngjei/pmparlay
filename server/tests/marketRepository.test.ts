@@ -217,6 +217,33 @@ describe("market catalog persistence safety", () => {
     expect(result).toMatchObject({ markets: 1, outcomes: 2, snapshots: 1 });
   });
 
+  it("stores compact snapshots without duplicated or volatile catalog metadata", async () => {
+    await persistMarketCatalog(catalogFixture(false), { now: new Date("2026-07-13T00:00:00.000Z") });
+
+    const snapshotInsert = dbMocks.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO market_snapshots"));
+    const raw = snapshotInsert?.[1][5];
+
+    expect(raw).toMatchObject({
+      schemaVersion: 3,
+      marketId: "election-market",
+      publiclyVisible: true,
+      complete: false,
+      totalFeeds: 2,
+      successfulFeeds: 1
+    });
+    expect(raw).not.toHaveProperty("market");
+    expect(raw).not.toHaveProperty("capturedAt");
+    expect(raw).not.toHaveProperty("sweep");
+    expect(raw.outcomes[0]).not.toHaveProperty("eligibility");
+    expect(raw.outcomes[0]).not.toHaveProperty("sourceAsOf");
+  });
+
+  it("never mutates snapshot evidence in place", async () => {
+    await persistMarketCatalog(catalogFixture(false), { now: new Date("2026-07-13T00:00:00.000Z") });
+
+    expect(dbMocks.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE market_snapshots"))).toBe(false);
+  });
+
   it("rolls back without market writes when the job aborts during sweep-state locking", async () => {
     const controller = new AbortController();
     dbMocks.query.mockImplementation(async (sql: string) => {
@@ -431,7 +458,7 @@ describe("market catalog persistence safety", () => {
     const missingUpdate = dbMocks.query.mock.calls.find((call) => String(call[0]).includes("NOT (source_market_id = ANY"));
 
     expect(missingUpdate?.[1][0]).toEqual(["election-market"]);
-    expect(result).toMatchObject({ markets: 0, outcomes: 0, snapshots: 0, sweepGenerationComplete: true });
+    expect(result).toMatchObject({ markets: 0, outcomes: 0, snapshots: 2, sweepGenerationComplete: true });
   });
 
   it("ignores tombstones for markets that have never been persisted", async () => {

@@ -51,7 +51,7 @@ jobs:
           cache: npm
 
       - name: Install
-        run: npm ci
+        run: npm ci --no-audit
 
       - name: Typecheck and build frontend
         run: npm run build

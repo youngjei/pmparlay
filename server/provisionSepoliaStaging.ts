@@ -14,6 +14,7 @@ import {
   config
 } from "./config";
 import { closePool } from "./db/client";
+import { provisionFounderSepoliaShadowVault } from "./db/lpVaultRepository";
 import { migrate } from "./db/migrate";
 
 const stagingDatabaseName = "legwork_sepolia_staging";
@@ -242,6 +243,13 @@ export function stagingDepositStartBlock(input: { reset: boolean; existing?: str
     : input.proposed;
 }
 
+export function stagingShadowVaultProvisioningInput(treasuryAddress: string) {
+  return {
+    treasuryAddress: getAddress(treasuryAddress),
+    tokenAddress: CIRCLE_SEPOLIA_USDC_CONTRACT_ADDRESS
+  };
+}
+
 async function verifyFreshFinancialState(databaseUrl: string) {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
@@ -288,6 +296,9 @@ export async function provisionSepoliaStaging(reset = process.argv.includes("--r
   await closePool();
   config.DATABASE_URL = targetUrl;
   await migrate();
+  const shadowVault = await provisionFounderSepoliaShadowVault(
+    stagingShadowVaultProvisioningInput(process.env.TREASURY_SAFE_ADDRESS!)
+  );
   const backfill = await runSettlementIdentityBackfillCommand({ log: () => undefined });
   if (backfill.exitCode !== 0) throw new Error("staging_settlement_identity_backfill_failed");
   const counts = await verifyFreshFinancialState(targetUrl);
@@ -298,6 +309,12 @@ export async function provisionSepoliaStaging(reset = process.argv.includes("--r
     database: stagingDatabaseName,
     environmentFile: path.relative(process.cwd(), stagingEnvironmentPath),
     migrations: migrationCount,
+    shadowVault: {
+      id: shadowVault.id,
+      key: shadowVault.vaultKey,
+      depositsEnabled: shadowVault.depositsEnabled,
+      communityCustody: shadowVault.communityCustody
+    },
     depositStartBlock: depositStartBlock.toString(),
     financialRows: counts,
     reset

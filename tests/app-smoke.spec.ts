@@ -211,7 +211,61 @@ function mockApiOutcomes() {
   );
 }
 
+function lpVaultFixture(asOf = new Date().toISOString()) {
+  return {
+    mode: "shadow",
+    network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
+    depositsEnabled: false,
+    availability: "available",
+    vault: {
+      id: "00000000-0000-4000-8000-000000000001",
+      key: "founder-sepolia-shadow",
+      name: "LEGWORK Founder Shadow Vault",
+      capitalSource: "founder",
+      custodyModel: "logical_operating_treasury",
+      communityCustody: false,
+      treasuryAddress: "0x1d4fd58d9fc24c9f3c8da0deb4a05e7d122ef17b",
+      tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
+    },
+    epoch: {
+      id: "00000000-0000-4000-8000-000000000002",
+      number: 1,
+      status: "active",
+      startsAt: "2026-09-01T00:00:00.000Z"
+    },
+    snapshot: {
+      accountingScope: "global_house_book_not_lp_attributed",
+      asOf,
+      blockNumber: "9123456",
+      blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      treasuryAssetsUsd: 100,
+      seniorUserObligationsUsd: 20,
+      grossUnresolvedPayoutsUsd: 30,
+      reservedNetLiabilityUsd: 20,
+      hardCapitalUsd: 50,
+      hardSolvencyFloorUsd: 50,
+      operatingCoverageBufferUsd: 7.5,
+      pendingBasketStakeUsd: 0,
+      pendingBasketMaxPayoutUsd: 0,
+      pendingBasketCount: 0,
+      pendingBasketCapacityChargeUsd: 0,
+      operatingWithdrawalFloorUsd: 57.5,
+      capitalAboveWithdrawalFloorUsd: 42.5,
+      grossCoverage: 2.666667,
+      custodyDeltaUsd: 0,
+      solvencyStatus: "healthy",
+      gate: { underwriting: "open", seniorOperations: "open", lpWithdrawals: "not_live" }
+    }
+  };
+}
+
 async function mockPolymarket(page: Page) {
+  await page.route("**/api/lp-vault", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(lpVaultFixture())
+    });
+  });
   await page.route("**/api/account", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -352,6 +406,160 @@ async function mockPolymarket(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await mockPolymarket(page);
+});
+
+test("LP Vault deep-link shows fresh collateral evidence and preserves browser navigation", async ({ page }) => {
+  await page.goto("/");
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  await expect(nav.getByRole("button")).toHaveCount(3);
+
+  await nav.getByRole("button", { name: "LP Vault" }).click();
+  await expect(page).toHaveURL(/#lp-vault$/);
+  await expect(page.getByRole("heading", { name: "House-book reserve monitor" })).toBeVisible();
+  await expect(page.getByText("Founder-funded Sepolia shadow", { exact: true })).toBeVisible();
+  await expect(page.getByText("Observed house treasury", { exact: true })).toBeVisible();
+  await expect(page.getByText("Global house-book USDC, not segregated LP assets.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Community LP activity is not live", { exact: true })).toBeVisible();
+  await expect(page.getByText(/This is not a deposit or withdrawal window\./)).toBeVisible();
+  await expect(page.getByText(/Modeled capital surplus/)).toBeVisible();
+  await expect(page.getByText("Vault assets", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Shadow withdrawal capacity", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Next liquidity window", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("New basket underwriting", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Minimum collateral required", { exact: true })).toBeVisible();
+  await expect(page.getByText("Modeled minimum after future LP withdrawals", { exact: true })).toBeVisible();
+  await expect(page.getByText("Modeled future LP withdrawal policy", { exact: true })).toBeVisible();
+  await expect(page.getByText(/If community LP withdrawals launch/)).toBeVisible();
+  await expect(page.getByText("Fully collateralized", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: /Treasury/ })).toHaveAttribute("href", /sepolia\.etherscan\.io\/address\//);
+  await expect(page.getByRole("link", { name: "View latest vault state JSON" })).toHaveAttribute("href", "/api/lp-vault");
+  await expect(page.getByRole("link", { name: "View snapshot JSON" })).toHaveCount(0);
+
+  if (process.env.LP_VAULT_QA_SCREENSHOTS === "1") {
+    await page.screenshot({ path: ".context/qa/lp-vault-desktop.png", fullPage: true });
+  }
+  await page.setViewportSize({ width: 320, height: 760 });
+  if (process.env.LP_VAULT_QA_SCREENSHOTS === "1") {
+    await page.screenshot({ path: ".context/qa/lp-vault-mobile.png", fullPage: true });
+  }
+  const freshViewport = await page.evaluate(() => ({
+    width: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth
+  }));
+  expect(freshViewport.scrollWidth).toBeLessThanOrEqual(freshViewport.width);
+
+  await page.goBack();
+  await expect(page).toHaveURL("http://localhost:5174/");
+  await expect(page.getByRole("heading", { name: "Discover" })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#lp-vault$/);
+});
+
+test("connected wallet preserves the complete brand and wallet access at 320px", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 760 });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const [appModule, reactModule, reactDomClientModule] = await Promise.all([
+      import("/src/App.tsx"),
+      import("/node_modules/.vite/deps/react.js"),
+      import("/node_modules/.vite/deps/react-dom_client.js")
+    ]);
+    const rootElement = document.getElementById("root")!;
+    rootElement.replaceChildren();
+    const react = reactModule.default || reactModule;
+    const reactDomClient = reactDomClientModule.default || reactDomClientModule;
+    (window as Window & { __logoutCalls?: number }).__logoutCalls = 0;
+    reactDomClient.createRoot(rootElement).render(
+      react.createElement(appModule.default, {
+        auth: {
+          enabled: true,
+          authenticated: true,
+          ready: true,
+          walletSynced: true,
+          walletSyncStatus: "synced",
+          walletAddress: "0xce59c7004182098fc430c204e9cd1474be9ee492",
+          userLabel: "0xce59...e492",
+          walletUsdcBalance: 33,
+          walletBalanceState: "ready",
+          getAccessToken: async () => "test-token",
+          logout: () => {
+            const testWindow = window as Window & { __logoutCalls?: number };
+            testWindow.__logoutCalls = (testWindow.__logoutCalls || 0) + 1;
+          }
+        }
+      })
+    );
+  });
+
+  const brand = page.locator(".brand-lockup");
+  const wallet = page.locator(".wallet-pill");
+  await expect(brand).toContainText("LEGWORK");
+  await expect(wallet).toContainText("Disconnect wallet");
+
+  const geometry = await page.evaluate(() => {
+    const topbar = document.querySelector<HTMLElement>(".topbar")!;
+    const brand = document.querySelector<HTMLElement>(".brand-lockup")!;
+    const wallet = document.querySelector<HTMLElement>(".wallet-pill")!;
+    const topbarBox = topbar.getBoundingClientRect();
+    const brandBox = brand.getBoundingClientRect();
+    const walletBox = wallet.getBoundingClientRect();
+    return {
+      brandFitsOwnBox: brand.scrollWidth <= brand.clientWidth,
+      walletFitsOwnBox: wallet.scrollWidth <= wallet.clientWidth,
+      brandRight: brandBox.right,
+      walletLeft: walletBox.left,
+      walletRight: walletBox.right,
+      topbarRight: topbarBox.right
+    };
+  });
+
+  expect(geometry.brandFitsOwnBox).toBe(true);
+  expect(geometry.walletFitsOwnBox).toBe(true);
+  expect(geometry.brandRight).toBeLessThanOrEqual(geometry.walletLeft - 4);
+  expect(geometry.walletRight).toBeLessThanOrEqual(geometry.topbarRight);
+
+  await wallet.click();
+  expect(await page.evaluate(() => (window as Window & { __logoutCalls?: number }).__logoutCalls)).toBe(1);
+});
+
+test("LP Vault withholds stale amounts and fits the 320px primary navigation", async ({ page }) => {
+  await page.unroute("**/api/lp-vault");
+  await page.route("**/api/lp-vault", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      mode: "shadow",
+      network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
+      depositsEnabled: false,
+      availability: "reconciliation_stale",
+      vault: null,
+      epoch: null,
+      snapshot: null
+    })
+  }));
+  await page.setViewportSize({ width: 320, height: 760 });
+  await page.goto("/#lp-vault");
+
+  await expect(page.getByText("Reconciliation is out of date").first()).toBeVisible();
+  await expect(page.getByText("$100.00")).toHaveCount(0);
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  await expect(nav.getByRole("button", { name: "Markets" })).toBeVisible();
+  await expect(nav.getByRole("button", { name: "Portfolio" })).toBeVisible();
+  await expect(nav.getByRole("button", { name: "LP Vault" })).toBeVisible();
+  const viewport = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.width);
+});
+
+test("LP Vault withholds a mounted snapshot exactly when its evidence expires", async ({ page }) => {
+  await page.unroute("**/api/lp-vault");
+  await page.route("**/api/lp-vault", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify(lpVaultFixture(new Date(Date.now() - (5 * 60_000 - 3_000)).toISOString()))
+  }));
+  await page.goto("/#lp-vault");
+
+  await expect(page.getByText("$100.00").first()).toBeVisible();
+  await expect(page.getByText("Reconciliation is out of date").first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText("$100.00")).toHaveCount(0);
 });
 
 test("market basket controls work", async ({ page }) => {
@@ -821,59 +1029,142 @@ test("claimable tickets load every page, use claimable amounts, and keep one ide
   expect(claimKeys[1]).toBe(claimKeys[0]);
 });
 
-test("voided claimables are presented as stake refunds instead of wins", async ({ page }) => {
-  const refundTicket = {
-    ticketId: "refund-ticket",
-    quoteId: "quote-refund",
+test("partial voids remain reduced payouts while all-void tickets show an automatic stake return", async ({ page }) => {
+  const partialVoidTicket = {
+    ticketId: "partial-void-ticket",
+    quoteId: "quote-partial-void",
     status: "claimable",
     createdAt: "2026-07-01T10:00:00Z",
     updatedAt: "2026-07-02T10:00:00Z",
     stakeUsd: 25,
+    operationFeeUsd: 1.5,
+    amountPaidUsd: 26.5,
+    potentialPayoutUsd: 180,
+    claimableAmountUsd: 84.5,
+    accountingMode: "house_book_usdc",
+    currency: "USDC",
+    legs: 3,
+    legStatusCounts: { pending: 0, won: 2, lost: 0, voided: 1, disputed: 0 }
+  };
+  const allVoidTicket = {
+    ticketId: "all-void-ticket",
+    quoteId: "quote-all-void",
+    status: "voided",
+    createdAt: "2026-07-01T09:00:00Z",
+    updatedAt: "2026-07-02T09:00:00Z",
+    stakeUsd: 25,
     operationFeeUsd: 1,
     amountPaidUsd: 26,
-    potentialPayoutUsd: 180,
-    claimableAmountUsd: 25,
+    potentialPayoutUsd: 160,
     accountingMode: "house_book_usdc",
     currency: "USDC",
     legs: 2,
-    legStatusCounts: { pending: 0, won: 1, lost: 0, voided: 1, disputed: 0 }
+    legStatusCounts: { pending: 0, won: 0, lost: 0, voided: 2, disputed: 0 }
+  };
+  const legacyReviewTicket = {
+    ...partialVoidTicket,
+    ticketId: "legacy-review-ticket",
+    quoteId: "quote-legacy-review",
+    claimableAmountUsd: 0,
+    settlementPolicyReviewRequired: true
   };
   await page.unroute("**/api/tickets");
   await page.unroute("**/api/tickets/claimable**");
   await page.route("**/api/tickets", (route) =>
-    route.fulfill({ contentType: "application/json", body: JSON.stringify({ tickets: [refundTicket] }) })
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ tickets: [legacyReviewTicket, allVoidTicket, partialVoidTicket] }) })
   );
   await page.route("**/api/tickets/claimable**", (route) =>
-    route.fulfill({ contentType: "application/json", body: JSON.stringify({ tickets: [refundTicket], pageInfo: { hasMore: false } }) })
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ tickets: [partialVoidTicket], pageInfo: { hasMore: false } }) })
   );
-  await page.route("**/api/tickets/refund-ticket", (route) =>
+  await page.route("**/api/tickets/partial-void-ticket", (route) =>
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        ...refundTicket,
+        ...partialVoidTicket,
         purchaseTxHash: "0x2222222222222222222222222222222222222222222222222222222222222222",
         purchaseChainId: 11155111,
         legs: [
-          { ticketLegId: "leg-won", status: "won", resolutionState: "resolved_won", question: "First market", outcome: "Yes" },
-          { ticketLegId: "leg-void", status: "voided", resolutionState: "resolved_void", question: "Voided market", outcome: "No" }
+          { ticketLegId: "leg-won-one", status: "won", resolutionState: "resolved_won", question: "Will Bitcoin close above $100,000?", outcome: "Yes" },
+          { ticketLegId: "leg-won-two", status: "won", resolutionState: "resolved_won", question: "Will Argentina win its next match?", outcome: "Yes" },
+          { ticketLegId: "leg-void", status: "voided", resolutionState: "resolved_void", question: "Will Seoul receive rain tomorrow?", outcome: "No" }
+        ]
+      })
+    })
+  );
+  await page.route("**/api/tickets/all-void-ticket", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...allVoidTicket,
+        purchaseTxHash: "0x3333333333333333333333333333333333333333333333333333333333333333",
+        purchaseChainId: 11155111,
+        legs: [
+          { ticketLegId: "leg-void-one", status: "voided", resolutionState: "resolved_void", question: "Will the launch happen this week?", outcome: "Yes" },
+          { ticketLegId: "leg-void-two", status: "voided", resolutionState: "resolved_void", question: "Will the temperature exceed 100°F?", outcome: "No" }
+        ]
+      })
+    })
+  );
+  await page.route("**/api/tickets/legacy-review-ticket", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...legacyReviewTicket,
+        legs: [
+          { ticketLegId: "legacy-won", status: "won", resolutionState: "resolved_won", question: "Legacy resolved leg", outcome: "Yes" },
+          { ticketLegId: "legacy-void", status: "voided", resolutionState: "resolved_void", question: "Legacy voided leg", outcome: "Yes" }
         ]
       })
     })
   );
 
+  await page.setViewportSize({ width: 320, height: 760 });
   await page.goto("/");
   await page.getByRole("button", { name: "Portfolio" }).click();
   const claimPanel = page.locator(".claim-panel");
-  await expect(claimPanel).toContainText("Refund ready · $25.00");
-  await expect(claimPanel).toContainText("Stake returned; operation fee is not refunded.");
-  await expect(claimPanel.getByRole("button", { name: "Claim refund" })).toBeVisible();
+  await expect(claimPanel.locator(".claim-row")).toHaveCount(1);
+  await expect(claimPanel).toContainText("$84.50");
+  await expect(claimPanel).toContainText("3 legs");
+  await expect(claimPanel.getByRole("button", { name: "Claim", exact: true })).toBeVisible();
+  await expect(claimPanel.getByText("$25.00", { exact: true })).toHaveCount(0);
 
   const recent = page.locator(".account-panel").filter({ hasText: "Recent baskets" });
-  await expect(recent).toContainText("$25.00 refund");
-  await expect(recent).not.toContainText("$180 potential");
-  await expect(page.locator(".ticket-detail-panel")).toContainText("Refund ready");
-  await expect(page.locator(".ticket-detail-panel")).toContainText("Voided; the stake portion is refundable.");
-  await expect(page.getByText("Resolution resolved void")).toBeHidden();
+  const allVoidRow = recent.locator("button.account-row").filter({ hasText: "$25.00 stake returned" });
+  const partialVoidRow = recent.locator("button.account-row").filter({ hasText: "$84.50 payout" });
+  const legacyReviewRow = recent.locator("button.account-row").filter({ hasText: "Settlement under review" });
+  await expect(allVoidRow).toBeVisible();
+  await expect(partialVoidRow).toBeVisible();
+  await expect(legacyReviewRow).toBeVisible();
+  await expect(allVoidRow.locator(".status-pill")).toHaveText("Stake returned");
+  await expect(allVoidRow).toContainText("Available LEGWORK balance");
+  await expect(allVoidRow).toContainText("operation fee retained");
+  await expect(recent).not.toContainText("Refund due");
+
+  await allVoidRow.click();
+  const detail = page.locator(".ticket-detail-panel");
+  await expect(detail.locator(".status-pill").first()).toHaveText("Stake returned");
+  await expect(detail.getByText("Stake returned", { exact: true })).toHaveCount(2);
+  await expect(detail.getByText("Payout ready", { exact: true })).toHaveCount(0);
+  await expect(detail.getByRole("button", { name: /Claim/ })).toHaveCount(0);
+  await expect(detail.getByRole("status")).toHaveText("Stake returned automatically to your available LEGWORK balance. The operation fee was retained.");
+
+  await partialVoidRow.click();
+  await expect(detail.locator(".status-pill").first()).toHaveText("Claimable");
+  await expect(detail.getByText("Final payout", { exact: true })).toBeVisible();
+  await expect(detail.locator(".claim-action")).toContainText("$84.50");
+  await expect(detail.getByRole("button", { name: "Claim payout" })).toBeVisible();
+  const removedLeg = detail.locator(".ticket-leg-detail").filter({ hasText: "Will Seoul receive rain tomorrow?" });
+  await expect(removedLeg.locator(".status-pill")).toHaveText("Removed");
+  await expect(removedLeg).toContainText("Voided; this leg was removed from the basket payout calculation.");
+  await expect(detail).not.toContainText("Refund due");
+  await expect(detail).not.toContainText("Stake returned");
+
+  await legacyReviewRow.click();
+  await expect(detail.locator(".status-pill").first()).toHaveText("Settlement review");
+  await expect(detail).toContainText("This legacy ticket used an older void policy.");
+  await expect(detail.getByRole("button", { name: /Claim/ })).toHaveCount(0);
+  const viewport = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.width);
 });
 
 test("portfolio exposes compact explorer links and labels bounded history", async ({ page }) => {

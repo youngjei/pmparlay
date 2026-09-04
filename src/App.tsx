@@ -19,6 +19,7 @@ import {
   Trash2
 } from "lucide-react";
 import { fetchMarketCatalog } from "./marketData";
+import { LpVaultView } from "./LpVaultView";
 import { calculateParlay, formatCents, formatNumber, formatPercent, formatUsd } from "./parlayMath";
 import { assessTicketRisk } from "./riskEngine";
 import type { ClaimableTicketPage, FetchState, MarketCatalog, MarketCatalogQuery, MarketOutcome, ParlayLeg } from "./types";
@@ -190,7 +191,13 @@ class ApiRequestError extends Error {
 
 type PaymentFlowState = "idle" | "loading" | "ready" | "sending" | "pending" | "activating" | "recoverable" | "complete" | "error";
 
-type AppView = "markets" | "portfolio";
+type AppView = "markets" | "portfolio" | "lp-vault";
+
+function appViewFromHash(hash: string): AppView {
+  if (hash === "#portfolio") return "portfolio";
+  if (hash === "#lp-vault") return "lp-vault";
+  return "markets";
+}
 
 type AccountSummary = {
   balances: Array<{
@@ -215,6 +222,7 @@ type TicketSummary = {
   amountPaidUsd?: number;
   potentialPayoutUsd?: number;
   claimableAmountUsd?: number;
+  settlementPolicyReviewRequired?: boolean;
   accountingMode?: string;
   currency?: string;
   legs: number;
@@ -238,6 +246,7 @@ type TicketDetail = {
   amountPaidUsd: number;
   potentialPayoutUsd: number;
   claimableAmountUsd?: number;
+  settlementPolicyReviewRequired?: boolean;
   accountingMode: string;
   currency: string;
   purchaseTxHash?: string;
@@ -411,7 +420,7 @@ function statusLabel(status: string) {
     won: "Won",
     claimable: "Claimable",
     lost: "Lost",
-    voided: "Refund due",
+    voided: "Stake returned",
     paid: "Claimed",
     confirming: "Confirming",
     submitted: "Confirming",
@@ -438,13 +447,14 @@ function resolutionLabel(resolutionState?: string) {
     disputed: "Disputed",
     resolved_won: "Won",
     resolved_lost: "Lost",
-    resolved_void: "Refund due",
+    resolved_void: "Removed",
     resolved_partial: "Partial"
   };
   return resolutionState ? labels[resolutionState] : undefined;
 }
 
 function legStatusLabel(status: string, resolutionState?: string, endDate?: string, ticketStatus?: string) {
+  if (status === "voided" || resolutionState === "resolved_void") return "Removed";
   if (status === "pending" && ticketStatus === "lost") return "No longer needed";
   if (status === "pending") return resolutionLabel(resolutionState) || (isPastDate(endDate) ? "Checking" : "Active");
   return statusLabel(status);
@@ -479,18 +489,14 @@ function settlementSummaryText(leg: TicketDetail["legs"][number], ticketStatus: 
   const status = leg.resolutionState || leg.status;
   if (status === "resolved_won" || leg.status === "won") return "Resolved in your favor.";
   if (status === "resolved_lost" || leg.status === "lost") return "Resolved against this pick.";
-  if (status === "resolved_void" || leg.status === "voided") return "Voided; the stake portion is refundable.";
+  if (status === "resolved_void" || leg.status === "voided") return "Voided; this leg was removed from the basket payout calculation.";
   if (ticketStatus === "lost" && leg.status === "pending") return "No longer affects this basket.";
   if (status === "disputed" || status === "settlement_blocked") return "Settlement needs review.";
   if (isPastDate(leg.endDate)) return "Waiting for the final market result.";
   return "Market is still active.";
 }
 
-function isVoidedRefundTicket(ticket: TicketSummary | TicketDetail) {
-  if ("legStatusCounts" in ticket && ticket.legStatusCounts?.voided) return true;
-  if ("legs" in ticket && Array.isArray(ticket.legs)) {
-    return ticket.legs.some((leg) => leg.status === "voided" || leg.resolutionState === "resolved_void");
-  }
+function isAllVoidedTicket(ticket: TicketSummary | TicketDetail) {
   return ticket.status === "voided";
 }
 
@@ -892,7 +898,7 @@ function eventSiblingListId(eventKey: string) {
 }
 
 export default function App({ auth }: AppProps = {}) {
-  const [activeView, setActiveView] = useState<AppView>(() => (window.location.hash === "#portfolio" ? "portfolio" : "markets"));
+  const [activeView, setActiveView] = useState<AppView>(() => appViewFromHash(window.location.hash));
   const [marketCatalog, setMarketCatalog] = useState<MarketCatalog | null>(null);
   const [outcomes, setOutcomes] = useState<MarketOutcome[]>([]);
   const [fetchState, setFetchState] = useState<FetchState>("idle");
@@ -987,13 +993,13 @@ export default function App({ auth }: AppProps = {}) {
   const navigateToView = useCallback((view: AppView) => {
     setActiveView(view);
     const nextUrl = new URL(window.location.href);
-    nextUrl.hash = view === "portfolio" ? "portfolio" : "";
+    nextUrl.hash = view === "markets" ? "" : view;
     window.history.pushState({ view }, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
   useEffect(() => {
-    const syncViewFromLocation = () => setActiveView(window.location.hash === "#portfolio" ? "portfolio" : "markets");
+    const syncViewFromLocation = () => setActiveView(appViewFromHash(window.location.hash));
     window.addEventListener("popstate", syncViewFromLocation);
     return () => window.removeEventListener("popstate", syncViewFromLocation);
   }, []);
@@ -2179,7 +2185,7 @@ export default function App({ auth }: AppProps = {}) {
         <div className="account-empty-state">
           <WalletCardIcon />
           <strong>Connect wallet to see your account</strong>
-          <span>Your portfolio will show active baskets, claimable winnings, and withdrawals once your wallet is connected.</span>
+          <span>Your portfolio will show active baskets, claimable payouts, and withdrawals once your wallet is connected.</span>
           <button className="primary-inline-btn" disabled={!auth.ready} onClick={auth.login} type="button">
             Connect wallet
           </button>
@@ -2536,7 +2542,11 @@ export default function App({ auth }: AppProps = {}) {
   function renderTicketDetailPanel() {
     const selectedSummary = tickets.find((ticket) => ticket.ticketId === selectedTicketId);
     const detailStatus = ticketDetail?.status || selectedSummary?.status;
-    const voidRefund = ticketDetail ? isVoidedRefundTicket(ticketDetail) : selectedSummary ? isVoidedRefundTicket(selectedSummary) : false;
+    const allVoided = ticketDetail ? isAllVoidedTicket(ticketDetail) : selectedSummary ? isAllVoidedTicket(selectedSummary) : false;
+    const settlementReviewRequired = Boolean(
+      ticketDetail?.settlementPolicyReviewRequired || selectedSummary?.settlementPolicyReviewRequired
+    );
+    const hasFinalPayout = !settlementReviewRequired && (detailStatus === "claimable" || detailStatus === "paid");
 
     return (
       <section className="account-panel ticket-detail-panel" ref={ticketDetailPanelRef}>
@@ -2549,8 +2559,8 @@ export default function App({ auth }: AppProps = {}) {
             <h2>{selectedSummary ? compactId(selectedSummary.ticketId) : "Select a basket"}</h2>
           </div>
           {detailStatus ? (
-            <em className={`status-pill ${statusTone(voidRefund ? "voided" : detailStatus)}`}>
-              {voidRefund ? "Refund ready" : statusLabel(detailStatus)}
+            <em className={`status-pill ${statusTone(settlementReviewRequired ? "disputed" : allVoided ? "voided" : detailStatus)}`}>
+              {settlementReviewRequired ? "Settlement review" : allVoided ? "Stake returned" : statusLabel(detailStatus)}
             </em>
           ) : null}
         </div>
@@ -2579,8 +2589,16 @@ export default function App({ auth }: AppProps = {}) {
                 <strong>{formatUsd(ticketDetail.amountPaidUsd)}</strong>
               </div>
               <div>
-                <span>{voidRefund ? "Refund" : "Potential payout"}</span>
-                <strong>{formatUsd(voidRefund ? ticketDetail.claimableAmountUsd || ticketDetail.stakeUsd : ticketDetail.potentialPayoutUsd)}</strong>
+                <span>{settlementReviewRequired ? "Quoted payout" : allVoided ? "Stake returned" : hasFinalPayout ? "Final payout" : "Potential payout"}</span>
+                <strong>{formatUsd(
+                  settlementReviewRequired
+                      ? ticketDetail.potentialPayoutUsd
+                      : allVoided
+                      ? ticketDetail.stakeUsd
+                      : hasFinalPayout
+                      ? ticketDetail.claimableAmountUsd ?? 0
+                      : ticketDetail.potentialPayoutUsd
+                )}</strong>
               </div>
               <div>
                 <span>Stake</span>
@@ -2591,12 +2609,21 @@ export default function App({ auth }: AppProps = {}) {
                 <strong>{formatUsd(ticketDetail.operationFeeUsd)}</strong>
               </div>
             </div>
-            {ticketDetail.status === "claimable" ? (
+            {allVoided ? (
+              <div className="scoped-success" role="status">
+                Stake returned automatically to your available LEGWORK balance. The operation fee was retained.
+              </div>
+            ) : null}
+            {settlementReviewRequired ? (
+              <div className="scoped-warning" role="status">
+                This legacy ticket used an older void policy. Its payout is unavailable while the settlement record is reconciled.
+              </div>
+            ) : null}
+            {ticketDetail.status === "claimable" && !settlementReviewRequired ? (
               <div className="claim-action">
                 <div>
-                  <span>{voidRefund ? "Refund ready" : "Ready to claim"}</span>
+                  <span>Payout ready</span>
                   <strong>{formatUsd(ticketDetail.claimableAmountUsd || 0)}</strong>
-                  {voidRefund ? <small>Stake returned; operation fee is not refunded.</small> : null}
                 </div>
                 <button
                   disabled={claimingTicketId !== null}
@@ -2604,7 +2631,7 @@ export default function App({ auth }: AppProps = {}) {
                   type="button"
                 >
                   <Trophy size={17} />
-                  {claimingTicketId === ticketDetail.ticketId ? "Claiming" : voidRefund ? "Claim refund" : "Claim winnings"}
+                  {claimingTicketId === ticketDetail.ticketId ? "Claiming" : "Claim payout"}
                 </button>
               </div>
             ) : null}
@@ -2712,7 +2739,7 @@ export default function App({ auth }: AppProps = {}) {
           <div>
             <span className="section-label">
               <Trophy size={16} />
-              Winnings
+              Payouts
             </span>
             <h2>Ready to claim</h2>
           </div>
@@ -2727,13 +2754,8 @@ export default function App({ auth }: AppProps = {}) {
             {claimableTickets.map((ticket) => (
               <div className="account-row claim-row" key={ticket.ticketId}>
                 <div>
-                  <strong>
-                    {isVoidedRefundTicket(ticket) ? "Refund ready · " : ""}{formatUsd(ticket.claimableAmountUsd || 0)}
-                  </strong>
-                  <span>{isVoidedRefundTicket(ticket)
-                    ? "Stake returned; operation fee is not refunded."
-                    : `${ticket.legs} leg${ticket.legs === 1 ? "" : "s"} · ${shortDateTime(ticket.updatedAt || ticket.createdAt)}`}
-                  </span>
+                  <strong>{formatUsd(ticket.claimableAmountUsd || 0)}</strong>
+                  <span>{ticket.legs} leg{ticket.legs === 1 ? "" : "s"} · {shortDateTime(ticket.updatedAt || ticket.createdAt)}</span>
                 </div>
                 <button
                   className="claim-ticket-btn"
@@ -2741,7 +2763,7 @@ export default function App({ auth }: AppProps = {}) {
                   onClick={() => void claimTicketWinnings(ticket.ticketId)}
                   type="button"
                 >
-                  {claimingTicketId === ticket.ticketId ? "Claiming" : isVoidedRefundTicket(ticket) ? "Claim refund" : "Claim"}
+                  {claimingTicketId === ticket.ticketId ? "Claiming" : "Claim"}
                 </button>
               </div>
             ))}
@@ -2749,7 +2771,7 @@ export default function App({ auth }: AppProps = {}) {
         ) : (
           <div className="panel-empty">
             <Trophy size={22} />
-            <span>No winnings ready to claim.</span>
+            <span>No payouts ready to claim.</span>
           </div>
         )}
       </section>
@@ -2860,8 +2882,8 @@ export default function App({ auth }: AppProps = {}) {
                         {legProgressText(ticket) || `bought ${shortDateTime(ticket.createdAt)}`}
                       </span>
                     </div>
-                    <em className={`status-pill ${statusTone(isVoidedRefundTicket(ticket) ? "voided" : ticket.status)}`}>
-                      {isVoidedRefundTicket(ticket) ? "Refund ready" : statusLabel(ticket.status)}
+                    <em className={`status-pill ${statusTone(isAllVoidedTicket(ticket) ? "voided" : ticket.status)}`}>
+                      {isAllVoidedTicket(ticket) ? "Stake returned" : statusLabel(ticket.status)}
                     </em>
                   </button>
                 ))}
@@ -2929,16 +2951,25 @@ export default function App({ auth }: AppProps = {}) {
                   >
                     <div>
                       <strong>
-                        {isVoidedRefundTicket(ticket)
-                          ? `${formatUsd(ticket.claimableAmountUsd || ticket.stakeUsd || 0)} refund`
-                          : `${formatUsd(ticket.potentialPayoutUsd || 0)} potential`}
+                        {ticket.settlementPolicyReviewRequired
+                          ? "Settlement under review"
+                          : isAllVoidedTicket(ticket)
+                          ? `${formatUsd(ticket.stakeUsd || 0)} stake returned`
+                          : ticket.status === "claimable" || ticket.status === "paid"
+                            ? `${formatUsd(ticket.claimableAmountUsd || 0)} ${ticket.status === "paid" ? "claimed" : "payout"}`
+                            : `${formatUsd(ticket.potentialPayoutUsd || 0)} potential`}
                       </strong>
                       <span>
-                        {ticket.legs} leg{ticket.legs === 1 ? "" : "s"} · paid {formatUsd(ticket.amountPaidUsd || 0)} ·{" "}
-                        {legProgressText(ticket) || shortDateTime(ticket.createdAt)}
+                        {ticket.settlementPolicyReviewRequired
+                          ? `${ticket.legs} leg${ticket.legs === 1 ? "" : "s"} · legacy void policy reconciliation`
+                          : isAllVoidedTicket(ticket)
+                          ? `${ticket.legs} leg${ticket.legs === 1 ? "" : "s"} · Available LEGWORK balance · operation fee retained`
+                          : <>{ticket.legs} leg{ticket.legs === 1 ? "" : "s"} · paid {formatUsd(ticket.amountPaidUsd || 0)} ·{" "}{legProgressText(ticket) || shortDateTime(ticket.createdAt)}</>}
                       </span>
                     </div>
-                    <em className={`status-pill ${statusTone(ticket.status)}`}>{statusLabel(ticket.status)}</em>
+                    <em className={`status-pill ${statusTone(ticket.settlementPolicyReviewRequired ? "disputed" : ticket.status)}`}>
+                      {ticket.settlementPolicyReviewRequired ? "Settlement review" : statusLabel(ticket.status)}
+                    </em>
                   </button>
                 ))}
               </div>
@@ -3254,7 +3285,7 @@ export default function App({ auth }: AppProps = {}) {
           <p>Why win once when you can win big?</p>
         </div>
         <nav className="top-nav" aria-label="Primary">
-          {(["markets", "portfolio"] as const).map((view) => (
+          {(["markets", "portfolio", "lp-vault"] as const).map((view) => (
             <button
               className={activeView === view ? "top-nav-btn active" : "top-nav-btn"}
               key={view}
@@ -3262,7 +3293,7 @@ export default function App({ auth }: AppProps = {}) {
               aria-current={activeView === view ? "page" : undefined}
               type="button"
             >
-              {view === "markets" ? "Markets" : "Portfolio"}
+              {view === "markets" ? "Markets" : view === "portfolio" ? "Portfolio" : "LP Vault"}
             </button>
           ))}
         </nav>
@@ -3675,8 +3706,13 @@ export default function App({ auth }: AppProps = {}) {
           </details>
         </aside>
       </section>
-      ) : (
+      ) : activeView === "portfolio" ? (
         renderPortfolio()
+      ) : (
+        <LpVaultView
+          authenticated={Boolean(auth?.authenticated)}
+          onConnect={auth?.enabled && !auth.authenticated && auth.ready ? auth.login : undefined}
+        />
       )}
       <footer className="site-footer">
         <span>&copy; {new Date().getFullYear()} LEGWORK</span>

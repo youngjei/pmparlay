@@ -41,6 +41,7 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
   RATE_LIMIT_BACKEND: z.enum(["memory", "redis"]).default("memory"),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(3).optional(),
   RATE_LIMIT_SKIP_ON_REDIS_ERROR: z
     .enum(["true", "false"])
     .default("false")
@@ -105,7 +106,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   });
   const settlementAuthority: SettlementAuthority =
     parsed.SETTLEMENT_AUTHORITY ||
-    (parsed.SETTLEMENT_REQUIRE_ONCHAIN === false ? "polymarket_api" : "polygon_ctf");
+    (parsed.SETTLEMENT_REQUIRE_ONCHAIN === true ? "polygon_ctf" : "polymarket_api");
   const settlementRequiresOnchain = settlementAuthority === "polygon_ctf";
   const accountingMode = parsed.ACCOUNTING_MODE;
   const ledgerCurrency = accountingMode === "house_book_usdc" ? "USDC" : parsed.LEDGER_CURRENCY;
@@ -196,6 +197,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
 
   return {
     ...parsed,
+    TRUST_PROXY_HOPS: parsed.TRUST_PROXY_HOPS ?? (parsed.NODE_ENV === "production" ? 1 : 0),
     TREASURY_SAFE_ADDRESS: treasurySafeAddress,
     PRIVY_JWKS_URL: parsed.PRIVY_JWKS_URL || (parsed.PRIVY_APP_ID ? `https://auth.privy.io/api/v1/apps/${parsed.PRIVY_APP_ID}/jwks.json` : undefined),
     ACCOUNTING_MODE: accountingMode,

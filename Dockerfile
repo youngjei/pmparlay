@@ -2,8 +2,9 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
@@ -31,7 +32,7 @@ WORKDIR /app
 
 RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --no-audit
 
 FROM node:22-alpine AS runtime
 

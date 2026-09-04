@@ -217,6 +217,10 @@ describe("trusted reconciliation snapshot scope", () => {
       houseOperatingLedgerMicroUnits: "0",
       houseReserveLedgerMicroUnits: "0",
       openOperationFeeMicroUnits: "0",
+      softReservationCount: "0",
+      softReservationStakeMicroUnits: "0",
+      softReservationGrossPayoutMicroUnits: "0",
+      softReservationOperatingChargeMicroUnits: "0",
       treasuryAssetCount: "1"
     }));
   });

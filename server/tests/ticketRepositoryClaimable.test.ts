@@ -17,7 +17,11 @@ function ticketId(index: number) {
   return `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 }
 
-function row(index: number, createdAt: string, options: { userId?: string; voided?: boolean; status?: "claimable" | "won" } = {}) {
+function row(
+  index: number,
+  createdAt: string,
+  options: { userId?: string; voided?: boolean; status?: "claimable" | "won" | "voided"; finalPayoutMicroUsd?: string | null } = {}
+) {
   const cursorCreatedAt = createdAt.replace(/\.(\d{3})Z$/, ".$1000Z");
   return {
     userId: options.userId || userA,
@@ -38,7 +42,7 @@ function row(index: number, createdAt: string, options: { userId?: string; voide
     lostLegs: "0",
     voidedLegs: options.voided ? "1" : "0",
     disputedLegs: "0",
-    hasVoidedLeg: Boolean(options.voided)
+    finalPayoutMicroUsd: options.finalPayoutMicroUsd ?? null
   };
 }
 
@@ -92,17 +96,17 @@ describe("claimable ticket discovery", () => {
     expect(dbMocks.query.mock.calls.every(([, params]) => params[0] === userA)).toBe(true);
   });
 
-  it("computes claimable amount from bigint micro-units for wins and whole-ticket void refunds", async () => {
+  it("reads a partial-void winner's immutable final payout", async () => {
     dbMocks.query.mockResolvedValueOnce({
       rows: [
         row(1, "2026-07-10T00:01:00.000Z"),
-        row(2, "2026-07-10T00:00:00.000Z", { voided: true })
+        row(2, "2026-07-10T00:00:00.000Z", { voided: true, finalPayoutMicroUsd: "40000000" })
       ]
     });
 
     const page = await listClaimableTickets(userA, { limit: 10 });
 
-    expect(page.tickets.map((ticket) => ticket.claimableAmountUsd)).toEqual([100, 25]);
+    expect(page.tickets.map((ticket) => ticket.claimableAmountUsd)).toEqual([100, 40]);
   });
 
   it("carries PostgreSQL's six-digit UTC cursor timestamp without converting it through Date", async () => {
@@ -128,13 +132,17 @@ describe("claimable ticket discovery", () => {
     });
   });
 
-  it("includes the whole-ticket void refund amount in ticket detail", async () => {
+  it("does not expose an all-void automatic stake return as claimable winnings", async () => {
     dbMocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM tickets") && sql.includes("purchase_payment")) {
         return {
           rows: [
             {
-              ...row(1, "2026-07-10T00:00:00.000Z", { voided: true }),
+              ...row(1, "2026-07-10T00:00:00.000Z", {
+                voided: true,
+                status: "voided",
+                finalPayoutMicroUsd: "25000000"
+              }),
               purchaseTxHash: null,
               purchaseChainId: null
             }
@@ -147,6 +155,6 @@ describe("claimable ticket discovery", () => {
 
     const ticket = await getTicket(ticketId(1), userA);
 
-    expect(ticket).toMatchObject({ status: "claimable", claimableAmountUsd: 25 });
+    expect(ticket).toMatchObject({ status: "voided", claimableAmountUsd: 0 });
   });
 });

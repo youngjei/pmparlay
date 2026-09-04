@@ -84,6 +84,10 @@ type InternalReconciliationPosition = {
   openStakeMicroUnits: bigint;
   openOperationFeeMicroUnits: bigint;
   openReserveMicroUnits: bigint;
+  softReservationCount: bigint;
+  softReservationStakeMicroUnits: bigint;
+  softReservationGrossPayoutMicroUnits: bigint;
+  softReservationOperatingChargeMicroUnits: bigint;
   pendingWithdrawalMicroUnits: bigint;
   pendingWithdrawalLedgerMicroUnits: bigint;
   houseOperatingLedgerMicroUnits: bigint;
@@ -279,6 +283,44 @@ async function openReservePosition(client: pg.PoolClient) {
   };
 }
 
+async function softReservationPosition(client: pg.PoolClient) {
+  const result = await client.query<{
+    reservationCount: string;
+    stake: string;
+    grossPayout: string;
+    operatingCharge: string;
+  }>(
+    `
+      WITH active_reservations AS (
+        SELECT
+          quotes.stake_micro_usd AS stake,
+          quotes.offered_payout_micro_usd AS gross_payout,
+          GREATEST(
+            ((quotes.offered_payout_micro_usd * 125 + 99) / 100) - quotes.stake_micro_usd,
+            0
+          ) AS operating_charge
+        FROM quote_payment_exposure_reservations
+        JOIN quotes ON quotes.id = quote_payment_exposure_reservations.quote_id
+        WHERE quote_payment_exposure_reservations.status = 'reserved'
+          AND quote_payment_exposure_reservations.expires_at > now()
+      )
+      SELECT
+        count(*)::text AS "reservationCount",
+        COALESCE(sum(stake), 0)::text AS stake,
+        COALESCE(sum(gross_payout), 0)::text AS "grossPayout",
+        COALESCE(sum(operating_charge), 0)::text AS "operatingCharge"
+      FROM active_reservations
+    `
+  );
+  const row = result.rows[0];
+  return {
+    softReservationCount: toBigInt(row?.reservationCount),
+    softReservationStakeMicroUnits: toBigInt(row?.stake),
+    softReservationGrossPayoutMicroUnits: toBigInt(row?.grossPayout),
+    softReservationOperatingChargeMicroUnits: toBigInt(row?.operatingCharge)
+  };
+}
+
 async function pendingWithdrawalRequests(client: pg.PoolClient) {
   const result = await client.query<{ pending: string }>(
     `
@@ -294,6 +336,7 @@ async function pendingWithdrawalRequests(client: pg.PoolClient) {
 async function loadInternalPosition(client: pg.PoolClient): Promise<InternalReconciliationPosition> {
   const balances = await ledgerBalancesByAccountType(client);
   const reserves = await openReservePosition(client);
+  const softReservations = await softReservationPosition(client);
   return {
     internalCustodyMicroUnits: await internalCustodyMicroUnits(client),
     userAvailableMicroUnits: balances.get("user_usdc_available") || 0n,
@@ -303,7 +346,8 @@ async function loadInternalPosition(client: pg.PoolClient): Promise<InternalReco
     pendingWithdrawalLedgerMicroUnits: balances.get("pending_usdc_withdrawals") || 0n,
     houseOperatingLedgerMicroUnits: balances.get("house_usdc_operating") || 0n,
     houseReserveLedgerMicroUnits: balances.get("house_usdc_reserve") || 0n,
-    ...reserves
+    ...reserves,
+    ...softReservations
   };
 }
 
@@ -359,6 +403,10 @@ export async function createReconciliationSnapshot(input: {
       houseOperatingLedgerMicroUnits: position.houseOperatingLedgerMicroUnits.toString(),
       houseReserveLedgerMicroUnits: position.houseReserveLedgerMicroUnits.toString(),
       openOperationFeeMicroUnits: position.openOperationFeeMicroUnits.toString(),
+      softReservationCount: position.softReservationCount.toString(),
+      softReservationStakeMicroUnits: position.softReservationStakeMicroUnits.toString(),
+      softReservationGrossPayoutMicroUnits: position.softReservationGrossPayoutMicroUnits.toString(),
+      softReservationOperatingChargeMicroUnits: position.softReservationOperatingChargeMicroUnits.toString(),
       treasuryAssetCount: treasuryAssets.length.toString()
     };
     if (observedBlockNumber === undefined || !observedBlockHash) throw new Error("reconciliation_observed_block_missing");

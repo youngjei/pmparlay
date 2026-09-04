@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { config, type SettlementAuthority } from "../config";
 import { assertFinancialGateOpenInTransaction } from "../financialGate";
+import { calculateSettlementPayout } from "../settlementPayout";
 import { validateCtfSettlementIdentity, type CtfSettlementIdentityValidation } from "../resolvers/polymarketSettlementResolver";
 import {
   validatePolymarketApiSettlementIdentity,
@@ -137,10 +138,10 @@ export type SettledLeg = {
 };
 
 export function deriveTicketStatus(statuses: string[]): SettledLeg["ticketStatus"] {
-  if (statuses.some((status) => status === "voided")) return "voided";
-  if (statuses.some((status) => status === "pending" || status === "disputed")) return "live";
   if (statuses.some((status) => status === "lost")) return "lost";
+  if (statuses.some((status) => status === "pending" || status === "disputed")) return "live";
   if (statuses.length === 0) return "live";
+  if (statuses.every((status) => status === "voided")) return "voided";
   return "won";
 }
 
@@ -2147,82 +2148,127 @@ async function assertHouseBookSettlementFinality(
   assertHouseBookCtfFinality(input, leg);
 }
 
-async function makeFinalTicketClaimableIfNeeded(client: pg.PoolClient, ticketId: string, ticketStatus: SettledLeg["ticketStatus"]) {
+async function finalizeTicketSettlementIfNeeded(client: pg.PoolClient, ticketId: string, ticketStatus: SettledLeg["ticketStatus"]) {
   if (ticketStatus !== "won" && ticketStatus !== "voided" && ticketStatus !== "lost") return ticketStatus;
 
   const ticket = await client.query<{
     user_id: string;
-    stake_micro_usd: string;
-    offered_payout_micro_usd: string;
     accounting_mode: string;
     funding_currency: string;
+    reserve_id: string | null;
+    stake_micro_units: string | null;
+    operation_fee_micro_units: string | null;
+    offered_payout_micro_units: string | null;
+    net_liability_micro_units: string | null;
+    reserve_status: string | null;
+    release_transaction_id: string | null;
   }>(
     `
       SELECT
         tickets.user_id,
         tickets.accounting_mode,
         tickets.funding_currency,
-        quotes.stake_micro_usd::text,
-        quotes.offered_payout_micro_usd::text
+        ticket_reserves.id AS reserve_id,
+        ticket_reserves.stake_micro_units::text,
+        ticket_reserves.operation_fee_micro_units::text,
+        ticket_reserves.offered_payout_micro_units::text,
+        ticket_reserves.net_liability_micro_units::text,
+        ticket_reserves.status AS reserve_status,
+        ticket_reserves.release_transaction_id::text
       FROM tickets
-      JOIN quotes ON quotes.id = tickets.quote_id
+      LEFT JOIN ticket_reserves ON ticket_reserves.ticket_id = tickets.id
       WHERE tickets.id = $1
-      FOR UPDATE
+      FOR UPDATE OF tickets
     `,
     [ticketId]
   );
   const row = ticket.rows[0];
   if (!row) throw new Error("ticket_not_found");
 
-  const finalAuditAction = ticketStatus === "lost" ? "ticket.reserve_released" : "ticket.claimable";
-  const alreadyFinalized = await client.query<{ action: string }>(
+  const quarantine = await client.query<{ id: string }>(
     `
-      SELECT action
-      FROM audit_log
-      WHERE action = ANY($2::text[])
-        AND entity_type = 'ticket'
-        AND entity_id = $1
+      SELECT id
+      FROM ticket_settlement_policy_quarantines
+      WHERE ticket_id = $1
+        AND resolved_at IS NULL
       LIMIT 1
     `,
-    [ticketId, ticketStatus === "lost" ? ["ticket.reserve_released"] : ["ticket.claimable", "ticket.paid"]]
+    [ticketId]
   );
-
-  if (alreadyFinalized.rows[0]) {
-    if (ticketStatus === "lost") return "lost";
-    return alreadyFinalized.rows[0].action === "ticket.paid" ? "paid" : "claimable";
+  if (quarantine.rows[0]) throw new Error("ticket_settlement_policy_quarantined");
+  if (
+    !row.reserve_id
+    || row.stake_micro_units === null
+    || row.operation_fee_micro_units === null
+    || row.offered_payout_micro_units === null
+    || row.net_liability_micro_units === null
+    || !row.reserve_status
+  ) {
+    throw new Error("ticket_financial_terms_missing");
   }
 
-  const payoutMicroUsd = ticketStatus === "won" ? BigInt(row.offered_payout_micro_usd) : BigInt(row.stake_micro_usd);
+  const existingSummary = await client.query<{ final_status: "won" | "lost" | "voided" }>(
+    `
+      SELECT final_status
+      FROM ticket_settlement_summaries
+      WHERE ticket_id = $1
+      LIMIT 1
+    `,
+    [ticketId]
+  );
+  if (existingSummary.rows[0]) {
+    if (existingSummary.rows[0].final_status === "lost") return "lost";
+    if (existingSummary.rows[0].final_status === "voided") return "voided";
+    const current = await client.query<{ status: SettledLeg["ticketStatus"] }>("SELECT status FROM tickets WHERE id = $1", [ticketId]);
+    return current.rows[0]?.status === "paid" ? "paid" : "claimable";
+  }
+
+  const legs = await client.query<{ id: string; status: string; accepted_price_bps: number }>(
+    `
+      SELECT ticket_legs.id, ticket_legs.status, ticket_legs.accepted_price_bps
+      FROM ticket_legs
+      WHERE ticket_legs.ticket_id = $1
+      ORDER BY ticket_legs.created_at ASC, ticket_legs.id ASC
+      FOR SHARE OF ticket_legs
+    `,
+    [ticketId]
+  );
+  const calculation = calculateSettlementPayout({
+    stakeMicroUsdc: BigInt(row.stake_micro_units),
+    originalOfferedPayoutMicroUsdc: BigInt(row.offered_payout_micro_units),
+    legs: legs.rows.map((leg) => ({
+      id: leg.id,
+      status: leg.status as "won" | "voided" | "lost" | "pending" | "disputed",
+      frozenPriceBps: BigInt(leg.accepted_price_bps)
+    }))
+  });
+  if (!calculation.isFinal || calculation.finalStatus !== ticketStatus || calculation.finalPayoutMicroUsdc === null) {
+    throw new Error("ticket_settlement_calculation_state_mismatch");
+  }
+
+  const payoutMicroUsd = BigInt(calculation.finalPayoutMicroUsdc);
   const accounts = accountTypes(row.accounting_mode);
   const currency = row.funding_currency;
   if (row.accounting_mode === "house_book_usdc" && currency !== "USDC") {
     throw new Error("invalid_house_book_currency");
   }
-  const userClaimableAccountId = await ensureLedgerAccount(client, row.user_id, accounts.userClaimable, currency);
+  const userPayoutAccountId = ticketStatus === "lost"
+    ? null
+    : await ensureLedgerAccount(
+      client,
+      row.user_id,
+      ticketStatus === "voided" ? accounts.userAvailable : accounts.userClaimable,
+      currency
+    );
   const houseAccountId = await ensureLedgerAccount(client, null, accounts.houseOperating, currency);
   const houseReserveAccountId = await ensureLedgerAccount(client, null, accounts.houseReserve, currency);
-  const transactionId = randomUUID();
+  const transactionId = ticketStatus === "lost" ? null : randomUUID();
 
-  const reserve = await client.query<{
-    id: string;
-    net_liability_micro_units: string;
-    status: string;
-    release_transaction_id: string | null;
-  }>(
-    `
-      SELECT id, net_liability_micro_units::text, status, release_transaction_id::text
-      FROM ticket_reserves
-      WHERE ticket_id = $1
-      FOR UPDATE
-    `,
-    [ticketId]
-  );
-  const reserveRow = reserve.rows[0];
-  const reservedLiability = BigInt(reserveRow?.net_liability_micro_units || 0);
-  const releasesReserveNow = reservedLiability > 0n && reserveRow?.status === "reserved";
+  const reservedLiability = BigInt(row.net_liability_micro_units);
+  const releasesReserveNow = reservedLiability > 0n && row.reserve_status === "reserved";
   const releaseTransactionId = releasesReserveNow
     ? randomUUID()
-    : reserveRow?.release_transaction_id || null;
+    : row.release_transaction_id || null;
 
   if (releasesReserveNow) {
     await client.query(
@@ -2236,7 +2282,8 @@ async function makeFinalTicketClaimableIfNeeded(client: pg.PoolClient, ticketId:
     );
   }
 
-  if (ticketStatus !== "lost") {
+  if (ticketStatus !== "lost" && transactionId && userPayoutAccountId) {
+    const memo = ticketStatus === "voided" ? "all-void ticket stake returned" : "ticket settlement claimable";
     await client.query(
       `
         INSERT INTO ledger_entries (transaction_id, account_id, amount_micro_units, currency, memo)
@@ -2244,24 +2291,57 @@ async function makeFinalTicketClaimableIfNeeded(client: pg.PoolClient, ticketId:
           ($1, $2, $3, $5, $6),
           ($1, $4, $7, $5, $6)
       `,
-      [transactionId, userClaimableAccountId, payoutMicroUsd.toString(), houseAccountId, currency, "ticket settlement claimable", (-payoutMicroUsd).toString()]
+      [transactionId, userPayoutAccountId, payoutMicroUsd.toString(), houseAccountId, currency, memo, (-payoutMicroUsd).toString()]
     );
   }
 
-  if (reserveRow) {
-    await client.query(
-      `
-        UPDATE ticket_reserves
-        SET
-          status = $2,
-          release_transaction_id = $3,
-          updated_at = now()
-        WHERE id = $1
-      `,
-      [reserveRow.id, ticketStatus === "won" ? "paid" : ticketStatus === "voided" ? "voided" : "released", releaseTransactionId]
-    );
-  }
+  await client.query(
+    `
+      UPDATE ticket_reserves
+      SET
+        status = $2,
+        release_transaction_id = $3,
+        updated_at = now()
+      WHERE id = $1
+    `,
+    [row.reserve_id, ticketStatus === "won" ? "paid" : ticketStatus === "voided" ? "voided" : "released", releaseTransactionId]
+  );
 
+  await client.query(
+    `
+      INSERT INTO ticket_settlement_summaries (
+        ticket_id,
+        final_status,
+        calculation_version,
+        stake_micro_units,
+        original_offered_payout_micro_units,
+        final_payout_micro_units,
+        operation_fee_micro_units,
+        calculation,
+        ledger_transaction_id,
+        reserve_release_transaction_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `,
+    [
+      ticketId,
+      calculation.finalStatus,
+      calculation.version,
+      row.stake_micro_units,
+      row.offered_payout_micro_units,
+      calculation.finalPayoutMicroUsdc,
+      row.operation_fee_micro_units,
+      jsonSafe(calculation),
+      transactionId,
+      releaseTransactionId
+    ]
+  );
+
+  const finalAuditAction = ticketStatus === "lost"
+    ? "ticket.reserve_released"
+    : ticketStatus === "voided"
+      ? "ticket.void_returned"
+      : "ticket.claimable";
   await client.query(
     `
       INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, metadata)
@@ -2271,83 +2351,25 @@ async function makeFinalTicketClaimableIfNeeded(client: pg.PoolClient, ticketId:
       row.user_id,
       ticketId,
       {
-        claimableMicroUnits: ticketStatus === "lost" ? "0" : payoutMicroUsd.toString(),
+        claimableMicroUnits: ticketStatus === "won" ? payoutMicroUsd.toString() : "0",
+        returnedMicroUnits: ticketStatus === "voided" ? payoutMicroUsd.toString() : "0",
         settlementFinalStatus: ticketStatus,
+        settlementCalculationVersion: calculation.version,
         accountingMode: row.accounting_mode,
         currency,
-        ledgerTransactionId: ticketStatus === "lost" ? null : transactionId,
+        ledgerTransactionId: transactionId,
         releaseTransactionId
       },
       finalAuditAction
     ]
   );
 
-  if (ticketStatus === "lost") return "lost";
-
-  await client.query("UPDATE tickets SET status = 'claimable', updated_at = now() WHERE id = $1", [ticketId]);
-  return "claimable";
-}
-
-async function applyWholeTicketVoidPolicy(client: pg.PoolClient, ticketId: string, triggeringTicketLegId: string, source: string) {
-  const openLegs = await client.query<{ id: string }>(
-    `
-      SELECT id
-      FROM ticket_legs
-      WHERE ticket_id = $1
-        AND id <> $2
-        AND status IN ('pending', 'disputed')
-      FOR UPDATE
-    `,
-    [ticketId, triggeringTicketLegId]
-  );
-
-  for (const leg of openLegs.rows) {
-    await client.query(
-      `
-        INSERT INTO settlements (ticket_leg_id, source, result, proof_reference, raw)
-        VALUES ($1, 'legwork_void_policy', 'voided', 'whole_ticket_void_precedence', $2)
-      `,
-      [
-        leg.id,
-        {
-          ticketId,
-          triggeringTicketLegId,
-          source,
-          policy: "any_final_void_voids_whole_ticket"
-        }
-      ]
-    );
-
-    await client.query(
-      `
-        UPDATE ticket_legs
-        SET
-          status = 'voided',
-          resolution_state = 'resolved_void',
-          resolution_updated_at = now(),
-          last_resolution_error = NULL,
-          settled_at = COALESCE(settled_at, now())
-        WHERE id = $1
-      `,
-      [leg.id]
-    );
-
-    await recordSettlementProof(client, {
-      ticketLegId: leg.id,
-      source: "legwork_void_policy",
-      proofKind: "whole_ticket_void_precedence",
-      result: "voided",
-      confidence: "manual_override",
-      raw: {
-        ticketId,
-        triggeringTicketLegId,
-        source,
-        policy: "any_final_void_voids_whole_ticket"
-      }
-    });
+  if (ticketStatus === "won") {
+    await client.query("UPDATE tickets SET status = 'claimable', updated_at = now() WHERE id = $1", [ticketId]);
+    return "claimable";
   }
 
-  return openLegs.rows.length;
+  return ticketStatus;
 }
 
 async function ledgerBalanceMicroUnits(client: pg.PoolClient, accountId: string) {
@@ -2506,6 +2528,18 @@ export async function claimTicketToAvailable(input: {
       throw new Error("ticket_accounting_mode_changed");
     }
 
+    const quarantine = await client.query<{ id: string }>(
+      `
+        SELECT id
+        FROM ticket_settlement_policy_quarantines
+        WHERE ticket_id = $1
+          AND resolved_at IS NULL
+        LIMIT 1
+      `,
+      [input.ticketId]
+    );
+    if (quarantine.rows[0]) throw new Error("ticket_settlement_policy_quarantined");
+
     const existingForTicket = await client.query<{
       amount_micro_units: string;
       currency: string;
@@ -2543,7 +2577,17 @@ export async function claimTicketToAvailable(input: {
       throw new Error("ticket_not_claimable");
     }
 
-    const claimableAudit = await client.query<{
+    const settlementSummary = await client.query<{ final_payout_micro_units: string }>(
+      `
+        SELECT final_payout_micro_units::text
+        FROM ticket_settlement_summaries
+        WHERE ticket_id = $1
+          AND final_status = 'won'
+        LIMIT 1
+      `,
+      [input.ticketId]
+    );
+    const claimableAudit = settlementSummary.rows[0] ? { rows: [] } : await client.query<{
       metadata: {
         claimableMicroUnits?: string | number;
         currency?: string;
@@ -2561,7 +2605,10 @@ export async function claimTicketToAvailable(input: {
       `,
       [input.ticketId]
     );
-    const claimableMicroUnits = positiveBigint(claimableAudit.rows[0]?.metadata?.claimableMicroUnits, "ticket_claimable_amount_missing");
+    const claimableMicroUnits = positiveBigint(
+      settlementSummary.rows[0]?.final_payout_micro_units ?? claimableAudit.rows[0]?.metadata?.claimableMicroUnits,
+      "ticket_claimable_amount_missing"
+    );
 
     const accounts = accountTypes(ticket.accounting_mode);
     const currency = ticket.funding_currency;
@@ -2840,10 +2887,8 @@ export async function recordLegSettlement(input: {
       raw: input.raw ?? input.proof?.raw ?? {}
     });
 
-    const policyVoidedLegs = input.result === "voided" ? await applyWholeTicketVoidPolicy(client, leg.ticket_id, input.ticketLegId, input.source || "manual_ops") : 0;
-
     const derivedTicketStatus = await updateTicketStatus(client, leg.ticket_id);
-    const ticketStatus = await makeFinalTicketClaimableIfNeeded(client, leg.ticket_id, derivedTicketStatus);
+    const ticketStatus = await finalizeTicketSettlementIfNeeded(client, leg.ticket_id, derivedTicketStatus);
 
     await client.query(
       `
@@ -2856,7 +2901,6 @@ export async function recordLegSettlement(input: {
           ticketId: leg.ticket_id,
           result: input.result,
           source: input.source || "manual_ops",
-          policyVoidedLegs,
           ticketStatus
         }
       ]

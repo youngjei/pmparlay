@@ -315,15 +315,15 @@ beforeEach(() => {
 });
 
 describe("settlement state machine", () => {
-  it("does not finalize a loss while unresolved legs could still void the ticket", () => {
-    expect(deriveTicketStatus(["won", "lost", "pending"])).toBe("live");
-    expect(deriveTicketStatus(["lost", "disputed"])).toBe("live");
+  it("finalizes a loss as soon as any authoritative leg loses", () => {
+    expect(deriveTicketStatus(["won", "lost", "pending"])).toBe("lost");
+    expect(deriveTicketStatus(["lost", "disputed"])).toBe("lost");
   });
 
-  it("voids the whole ticket when any leg is voided regardless of order", () => {
-    expect(deriveTicketStatus(["voided", "lost"])).toBe("voided");
-    expect(deriveTicketStatus(["voided", "pending"])).toBe("voided");
-    expect(deriveTicketStatus(["lost", "voided", "pending"])).toBe("voided");
+  it("does not let a voided leg override a loss or unresolved sibling", () => {
+    expect(deriveTicketStatus(["voided", "lost"])).toBe("lost");
+    expect(deriveTicketStatus(["voided", "pending"])).toBe("live");
+    expect(deriveTicketStatus(["lost", "voided", "pending"])).toBe("lost");
   });
 
   it("keeps tickets live while any leg is pending or disputed", () => {
@@ -331,8 +331,12 @@ describe("settlement state machine", () => {
     expect(deriveTicketStatus(["won", "disputed"])).toBe("live");
   });
 
-  it("voids tickets when all final legs include a void and no loss", () => {
-    expect(deriveTicketStatus(["won", "voided"])).toBe("voided");
+  it("wins a final ticket when at least one leg won and all other legs voided", () => {
+    expect(deriveTicketStatus(["won", "voided"])).toBe("won");
+  });
+
+  it("voids a ticket only when every leg voided", () => {
+    expect(deriveTicketStatus(["voided", "voided"])).toBe("voided");
   });
 
   it("wins tickets only when every leg won", () => {
@@ -1154,7 +1158,7 @@ describe("settlement state machine", () => {
     ).rejects.toThrow(expected);
   });
 
-  it("accepts a 50-50 payout vector only as a whole-ticket void", async () => {
+  it("accepts a 50-50 payout vector as a void result for the affected leg", async () => {
     mockHouseSettlementIdentityLock(lockedHouseLeg({ status: "voided" }));
     const evidence = payoutProviderEvidence().map((item) => ({
       ...item,
@@ -1251,20 +1255,28 @@ describe("settlement state machine", () => {
         return { rows: [lockedHouseLeg()] };
       }
       if (sql.includes("SELECT status") && sql.includes("FROM ticket_legs")) return { rows: [{ status: "won" }] };
-      if (sql.includes("FROM tickets") && sql.includes("JOIN quotes")) {
+      if (sql.includes("FROM tickets") && sql.includes("JOIN ticket_reserves")) {
         return {
           rows: [{
             user_id: "user-test",
-            stake_micro_usd: "1000000",
-            offered_payout_micro_usd: "2000000",
             accounting_mode: "house_book_usdc",
-            funding_currency: "USDC"
+            funding_currency: "USDC",
+            reserve_id: "reserve-test",
+            stake_micro_units: "1000000",
+            operation_fee_micro_units: "500000",
+            offered_payout_micro_units: "2000000",
+            net_liability_micro_units: "1000000",
+            reserve_status: "reserved",
+            release_transaction_id: null
           }]
         };
       }
-      if (sql.includes("SELECT action") && sql.includes("FROM audit_log")) return { rows: [] };
+      if (sql.includes("FROM ticket_settlement_policy_quarantines")) return { rows: [] };
+      if (sql.includes("SELECT final_status") && sql.includes("FROM ticket_settlement_summaries")) return { rows: [] };
+      if (sql.includes("ticket_legs.accepted_price_bps")) {
+        return { rows: [{ id: "ticket-leg-test", status: "won", accepted_price_bps: 5000 }] };
+      }
       if (sql.includes("INSERT INTO ledger_accounts")) return { rows: [{ id: "11111111-1111-1111-1111-111111111111" }] };
-      if (sql.includes("FROM ticket_reserves")) return { rows: [] };
       if (sql.includes("INSERT INTO settlement_proofs")) return { rows: [{ id: "settlement-proof-test" }] };
       return { rows: [], rowCount: 1 };
     });
@@ -1324,30 +1336,29 @@ describe("settlement state machine", () => {
       if (sql.includes("SELECT status") && sql.includes("FROM ticket_legs")) {
         return { rows: [{ status: "won" }] };
       }
-      if (sql.includes("FROM tickets") && sql.includes("JOIN quotes")) {
+      if (sql.includes("FROM tickets") && sql.includes("JOIN ticket_reserves")) {
         return {
           rows: [{
             user_id: "user-test",
-            stake_micro_usd: "1000000",
-            offered_payout_micro_usd: "2000000",
             accounting_mode: "play_money",
-            funding_currency: "USD"
-          }]
-        };
-      }
-      if (sql.includes("SELECT action") && sql.includes("FROM audit_log")) return { rows: [] };
-      if (sql.includes("INSERT INTO ledger_accounts")) {
-        return { rows: [{ id: "11111111-1111-1111-1111-111111111111" }] };
-      }
-      if (sql.includes("FROM ticket_reserves")) {
-        return {
-          rows: [{
-            id: "reserve-test",
+            funding_currency: "USD",
+            reserve_id: "reserve-test",
+            stake_micro_units: "1000000",
+            operation_fee_micro_units: "500000",
+            offered_payout_micro_units: "2000000",
             net_liability_micro_units: "1000000",
-            status: "released",
+            reserve_status: "released",
             release_transaction_id: existingReleaseTransactionId
           }]
         };
+      }
+      if (sql.includes("FROM ticket_settlement_policy_quarantines")) return { rows: [] };
+      if (sql.includes("SELECT final_status") && sql.includes("FROM ticket_settlement_summaries")) return { rows: [] };
+      if (sql.includes("ticket_legs.accepted_price_bps")) {
+        return { rows: [{ id: "ticket-leg-test", status: "won", accepted_price_bps: 5000 }] };
+      }
+      if (sql.includes("INSERT INTO ledger_accounts")) {
+        return { rows: [{ id: "11111111-1111-1111-1111-111111111111" }] };
       }
       if (sql.includes("INSERT INTO settlement_proofs")) {
         return { rows: [{ id: "settlement-proof-test" }] };

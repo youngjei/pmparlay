@@ -305,10 +305,10 @@ test("No prices remain red before and after selection", async ({ page }) => {
 
   const noButton = page.getByRole("button", { name: /^No\s+\d+¢ for / });
   const noPrice = noButton.locator("strong");
-  await expect(noPrice).toHaveCSS("color", "rgb(184, 57, 57)");
+  await expect(noPrice).toHaveCSS("color", "rgb(242, 54, 69)");
   await noButton.click();
   await expect(noButton).toHaveAttribute("aria-pressed", "true");
-  await expect(noPrice).toHaveCSS("color", "rgb(255, 119, 112)");
+  await expect(noPrice).toHaveCSS("color", "rgb(255, 107, 107)");
 });
 
 test("a delayed append cannot overwrite a newer search generation", async ({ page }) => {

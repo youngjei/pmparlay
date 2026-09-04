@@ -1,7 +1,7 @@
 # Railway Sepolia Staging
 
 Status: Required deployment configuration
-Last updated: 2026-08-27
+Last updated: 2026-09-04
 
 The supervised beta uses five Railway services: Postgres, Redis, the public web/API, and two grouped worker services. The API serves the compiled React application on the same origin, so browser API calls do not depend on a separate proxy or cross-origin configuration.
 
@@ -19,11 +19,15 @@ Create the Railway services `Postgres` and `Redis`, then create these repository
 
 This five-service layout is the approved small-scale staging topology. Before mainnet, upgrade Railway capacity and replace the two grouped worker services with five isolated worker services: market indexer, deposits, reconciliation, settlements, and outbox. Keep the public web/API, Postgres, and Redis as separate services.
 
-Railway automatically detects the root `Dockerfile`. Run `npm run db:migrate && npm run db:backfill-settlement-identities` as the `legwork-web` pre-deploy command. The grouped commands must run as one replica each. Use `/healthz` as Railway's deployment health check so web deployment does not depend circularly on workers starting first. Monitor `/readyz` separately as the release gate: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all four required worker roles are healthy.
+Railway automatically detects the root `Dockerfile`. Run `npm run db:migrate && npm run db:backfill-settlement-identities && npm run db:provision-lp-vault-shadow` as the `legwork-web` pre-deploy command. The vault provisioner is idempotent and refuses any scope except the configured Sepolia house book, treasury Safe, and Circle test-USDC token. The grouped commands must run as one replica each. Use `/healthz` as Railway's deployment health check so web deployment does not depend circularly on workers starting first. Monitor `/readyz` separately as the release gate: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all four required worker roles are healthy.
+
+Migration `0047` takes a short exclusive ticket-table lock while it freezes accepted terms and installs legacy quarantines. Run this pre-beta migration during a maintenance window with money-moving traffic paused. The migration runner's five-second lock timeout fails the deploy instead of waiting indefinitely when an older request has not drained.
+
+The Railway dashboard remains the current deployment source of truth. Before the private-beta release candidate, install and link the current Railway CLI, export the project configuration, review its generated `.railway/railway.ts`, and validate a configuration plan without embedding secrets. Until that export is reviewed, compare every service command, replica count, restart policy, pre-deploy command, and health check against this runbook before deployment.
 
 Run `npm run staging:qa:managed` inside the Railway web service for the migration-manifest, managed Postgres/Redis, Sepolia Safe, settlement quarantine, and financial-gate release check. The `--managed` path accepts only non-loopback Postgres and Redis targets; the Sepolia chain, Circle test-USDC contract, Safe owner, and threshold checks remain mandatory.
 
-Because the repository is private, grant the Railway GitHub App access to `youngjei/pmparlay` before enabling automatic deployments from `main`. `railway up` remains the manual deployment path while that permission is absent; do not replace the GitHub App permission with a personal access token stored in the repository.
+The repository is public. Railway still needs an active GitHub App installation for `youngjei/pmparlay` before enabling automatic deployments from `main`. `railway up` remains the manual deployment path while that installation is absent; do not replace the GitHub App connection with a personal access token stored in the repository.
 
 Do not run multiple replicas of either grouped worker service. PostgreSQL singleton leases reject duplicate financial workers, but deployment configuration should still request exactly one replica per group.
 
@@ -48,6 +52,7 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}
 REDIS_URL=${{Redis.REDIS_URL}}
 RATE_LIMIT_BACKEND=redis
 RATE_LIMIT_SKIP_ON_REDIS_ERROR=false
+TRUST_PROXY_HOPS=1
 TREASURY_SAFE_ADDRESS=0x1d4Fd58d9fC24c9F3C8dA0dEB4A05E7d122ef17B
 STAGING_EXPECTED_SAFE_OWNER=0xbb87c00499e15C3cCB24821BAE384A69797Fe1B8
 USDC_CONTRACT_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238

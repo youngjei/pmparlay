@@ -33,6 +33,7 @@ describe("production staging configuration", () => {
       SETTLEMENT_CHAIN_ID: SEPOLIA_PAYMENT_CHAIN_ID,
       USDC_CONTRACT_ADDRESS: CIRCLE_SEPOLIA_USDC_CONTRACT_ADDRESS,
       RATE_LIMIT_BACKEND: "redis",
+      TRUST_PROXY_HOPS: 1,
       DATABASE_POOL_MAX: 5,
       DATABASE_CONNECTION_TIMEOUT_MS: 5_000,
       DATABASE_STATEMENT_TIMEOUT_MS: 15_000,
@@ -41,9 +42,16 @@ describe("production staging configuration", () => {
     });
   });
 
-  it("allows supervised Sepolia API settlement without Polygon RPC credentials", () => {
+  it("uses one trusted Railway proxy hop by default and keeps it bounded", () => {
+    expect(loadConfig(productionEnvironment()).TRUST_PROXY_HOPS).toBe(1);
+    expect(loadConfig(productionEnvironment({ TRUST_PROXY_HOPS: "2" })).TRUST_PROXY_HOPS).toBe(2);
+    expect(() => loadConfig(productionEnvironment({ TRUST_PROXY_HOPS: "4" }))).toThrow("TRUST_PROXY_HOPS");
+  });
+
+  it("defaults production settlement to the Polymarket API without Polygon RPC credentials", () => {
     const environment = productionEnvironment({
-      SETTLEMENT_AUTHORITY: "polymarket_api",
+      SETTLEMENT_AUTHORITY: undefined,
+      SETTLEMENT_REQUIRE_ONCHAIN: undefined,
       POLYGON_RPC_URL: "",
       POLYGON_RPC_OPERATOR: "",
       POLYGON_SECONDARY_RPC_URL: "",

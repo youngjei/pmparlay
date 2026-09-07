@@ -853,6 +853,60 @@ describe("Polymarket keyset pagination", () => {
     });
   });
 
+  it("treats a successful empty continuation page as the end of a durable sweep", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        new Response(JSON.stringify({ events: [], next_cursor: null }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+
+    const result = await fetchPolymarketOutcomeResult(undefined, { afterCursor: "final-page", maxPages: 1 });
+
+    expect(result.outcomes).toEqual([]);
+    expect(result.tombstones).toEqual([]);
+    expect(result.nextCursor).toBeUndefined();
+    expect(result.sweep).toMatchObject({
+      startedAfterCursor: "final-page",
+      successfulPages: 1,
+      stoppedReason: "end",
+      complete: false
+    });
+  });
+
+  it("still rejects an empty first page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        new Response(JSON.stringify({ events: [], next_cursor: null }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+
+    await expect(fetchPolymarketOutcomeResult(undefined, { maxPages: 1 })).rejects.toThrow("No markets were returned");
+  });
+
+  it("rejects a malformed successful continuation response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "temporary failure" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+
+    await expect(
+      fetchPolymarketOutcomeResult(undefined, { afterCursor: "final-page", maxPages: 1 })
+    ).rejects.toThrow("Polymarket Gamma returned malformed events keyset response");
+  });
+
   it("marks safety-capped sweeps incomplete and exposes continuation cursor", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(eventPage("one", "cursor-two")), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);

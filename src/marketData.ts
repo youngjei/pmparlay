@@ -522,8 +522,16 @@ function dedupeOutcomes(outcomes: MarketOutcome[]) {
 }
 
 function keysetItems<T extends GammaEvent | GammaMarket>(response: GammaKeysetResponse, resource: "events" | "markets"): T[] {
-  const items = resource === "events" ? response.events || response.data || [] : response.markets || response.data || [];
-  return Array.isArray(items) ? (items as T[]) : [];
+  const resourceItems = resource === "events" ? response.events : response.markets;
+  if (resourceItems !== undefined) {
+    if (!Array.isArray(resourceItems)) throw new Error(`Polymarket Gamma returned malformed ${resource} keyset response`);
+    return resourceItems as T[];
+  }
+  if (response.data !== undefined) {
+    if (!Array.isArray(response.data)) throw new Error(`Polymarket Gamma returned malformed ${resource} keyset response`);
+    return response.data as T[];
+  }
+  throw new Error(`Polymarket Gamma returned malformed ${resource} keyset response`);
 }
 
 function nextCursorFrom(response: GammaKeysetResponse) {
@@ -926,8 +934,17 @@ export async function fetchPolymarketOutcomeResult(signal?: AbortSignal, options
   const records = eventMarketRecords(events.items);
   const outcomes = dedupeOutcomes(records.outcomes);
   const tombstones = records.tombstones;
+  const reachedEmptyContinuationEnd = Boolean(
+    options.afterCursor &&
+      events.items.length === 0 &&
+      events.successfulPages > 0 &&
+      events.stoppedReason === "end" &&
+      !events.nextCursor
+  );
 
-  if (outcomes.length === 0 && tombstones.length === 0) throw new Error("No markets were returned");
+  if (outcomes.length === 0 && tombstones.length === 0 && !reachedEmptyContinuationEnd) {
+    throw new Error("No markets were returned");
+  }
 
   const shouldHydrate = options.hydrate === true;
   const hydrateLimit = Math.max(0, Math.min(options.hydrateLimit ?? 100, outcomes.length));

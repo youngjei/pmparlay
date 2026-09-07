@@ -119,7 +119,7 @@ async function seedPlayMoneyTicket(client: pg.Client): Promise<SeededTicket> {
         id, user_id, policy_version_id, status, stake_micro_usd, operation_fee_micro_usd,
         spread_bps, implied_probability_bps, offered_payout_micro_usd, expires_at
       )
-      VALUES ($1, $2, $3, 'accepted', 10000000, 1000000, 0, 2000, 100000000, now() + interval '1 hour')
+      VALUES ($1, $2, $3, 'quoted', 10000000, 1000000, 0, 2000, 100000000, now() + interval '1 hour')
     `,
     [quoteId, userId, policyId]
   );
@@ -154,6 +154,11 @@ async function seedPlayMoneyTicket(client: pg.Client): Promise<SeededTicket> {
       [quoteLegId, quoteId, marketId, outcomeId, snapshotId, quotedPrices[index]]
     );
   }
+
+  await client.query(
+    "UPDATE quotes SET status = 'accepted', accepted_at = now() WHERE id = $1",
+    [quoteId]
+  );
 
   await client.query(
     `
@@ -279,6 +284,192 @@ afterEach(async () => {
 });
 
 postgresDescribe("per-leg void settlement PostgreSQL integration", () => {
+  it("serializes quote-leg insertion with acceptance", async (context) => {
+    await withDisposableSchema(context, async (client) => {
+      const seeded = await seedPlayMoneyTicket(client);
+      const source = await client.query<{
+        user_id: string;
+        policy_version_id: string;
+        market_id: string;
+        outcome_id: string;
+        market_snapshot_id: string;
+        outcome: string;
+        quoted_price_bps: number;
+      }>(
+        `
+          SELECT
+            quotes.user_id,
+            quotes.policy_version_id,
+            quote_legs.market_id,
+            quote_legs.outcome_id,
+            quote_legs.market_snapshot_id,
+            quote_legs.outcome,
+            quote_legs.quoted_price_bps
+          FROM tickets
+          JOIN quotes ON quotes.id = tickets.quote_id
+          JOIN quote_legs ON quote_legs.quote_id = quotes.id
+          WHERE tickets.id = $1
+          ORDER BY quote_legs.created_at
+          LIMIT 1
+        `,
+        [seeded.ticketId]
+      );
+      const quoteId = randomUUID();
+      const sourceRow = source.rows[0];
+      await client.query(
+        `
+          INSERT INTO quotes (
+            id, user_id, policy_version_id, status, stake_micro_usd, operation_fee_micro_usd,
+            spread_bps, implied_probability_bps, offered_payout_micro_usd, expires_at
+          )
+          VALUES ($1, $2, $3, 'quoted', 1000000, 0, 0, 5000, 2000000, now() + interval '1 hour')
+        `,
+        [quoteId, sourceRow.user_id, sourceRow.policy_version_id]
+      );
+
+      const concurrent = new pg.Client({ connectionString: config.DATABASE_URL });
+      await concurrent.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT id FROM quotes WHERE id = $1 FOR UPDATE", [quoteId]);
+        const insertion = concurrent.query(
+          `
+            INSERT INTO quote_legs (
+              id, quote_id, market_id, outcome_id, market_snapshot_id, outcome, quoted_price_bps
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `,
+          [
+            randomUUID(),
+            quoteId,
+            sourceRow.market_id,
+            sourceRow.outcome_id,
+            sourceRow.market_snapshot_id,
+            sourceRow.outcome,
+            sourceRow.quoted_price_bps
+          ]
+        ).then(
+          () => ({ status: "fulfilled" as const, error: null }),
+          (error: Error) => ({ status: "rejected" as const, error })
+        );
+        const earlyResult = await Promise.race([
+          insertion,
+          new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 75))
+        ]);
+        expect(earlyResult).toBe("blocked");
+
+        await client.query("UPDATE quotes SET status = 'accepted', accepted_at = now() WHERE id = $1", [quoteId]);
+        await client.query("COMMIT");
+        const result = await insertion;
+        expect(result.status).toBe("rejected");
+        expect(result.error?.message).toContain("accepted_quote_leg_immutable");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        await concurrent.end();
+      }
+    });
+  });
+
+  it("requires a complete leg set before reserving and freezes it afterward", async (context) => {
+    await withDisposableSchema(context, async (client) => {
+      const seeded = await seedPlayMoneyTicket(client);
+      const source = await client.query<{
+        user_id: string;
+        policy_version_id: string;
+        market_id: string;
+        outcome_id: string;
+        market_snapshot_id: string;
+        outcome: string;
+        quoted_price_bps: number;
+      }>(
+        `
+          SELECT
+            quotes.user_id,
+            quotes.policy_version_id,
+            quote_legs.market_id,
+            quote_legs.outcome_id,
+            quote_legs.market_snapshot_id,
+            quote_legs.outcome,
+            quote_legs.quoted_price_bps
+          FROM tickets
+          JOIN quotes ON quotes.id = tickets.quote_id
+          JOIN quote_legs ON quote_legs.quote_id = quotes.id
+          WHERE tickets.id = $1
+          ORDER BY quote_legs.created_at
+        `,
+        [seeded.ticketId]
+      );
+      const quoteId = randomUUID();
+      const ticketId = randomUUID();
+      const quoteLegIds = [randomUUID(), randomUUID()];
+      await client.query(
+        `
+          INSERT INTO quotes (
+            id, user_id, policy_version_id, status, stake_micro_usd, operation_fee_micro_usd,
+            spread_bps, implied_probability_bps, offered_payout_micro_usd, expires_at
+          )
+          VALUES ($1, $2, $3, 'quoted', 10000000, 1000000, 0, 2000, 100000000, now() + interval '1 hour')
+        `,
+        [quoteId, source.rows[0].user_id, source.rows[0].policy_version_id]
+      );
+      for (let index = 0; index < source.rows.length; index += 1) {
+        const row = source.rows[index];
+        await client.query(
+          `
+            INSERT INTO quote_legs (
+              id, quote_id, market_id, outcome_id, market_snapshot_id, outcome, quoted_price_bps
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `,
+          [quoteLegIds[index], quoteId, row.market_id, row.outcome_id, row.market_snapshot_id, row.outcome, row.quoted_price_bps]
+        );
+      }
+      await client.query("UPDATE quotes SET status = 'accepted', accepted_at = now() WHERE id = $1", [quoteId]);
+      await client.query(
+        "INSERT INTO tickets (id, user_id, quote_id, status, accounting_mode, funding_currency) VALUES ($1, $2, $3, 'accepted', 'play_money', 'USD')",
+        [ticketId, source.rows[0].user_id, quoteId]
+      );
+      await expect(client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status, accepted_price_bps) VALUES ($1, $2, 'pending', 1)",
+        [ticketId, quoteLegIds[0]]
+      )).rejects.toThrow("ticket_leg_accepted_terms_invalid");
+      await client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status) VALUES ($1, $2, 'pending')",
+        [ticketId, quoteLegIds[0]]
+      );
+      await expect(client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status) VALUES ($1, $2, 'pending')",
+        [ticketId, quoteLegIds[0]]
+      )).rejects.toThrow("ticket_legs_ticket_quote_leg_unique_idx");
+
+      const reserveValues = [ticketId, source.rows[0].user_id, randomUUID(), randomUUID()];
+      const insertReserve = () => client.query(
+        `
+          INSERT INTO ticket_reserves (
+            ticket_id, user_id, accounting_mode, currency, stake_micro_units,
+            operation_fee_micro_units, offered_payout_micro_units, net_liability_micro_units,
+            status, purchase_transaction_id, reserve_transaction_id
+          )
+          VALUES ($1, $2, 'play_money', 'USD', 10000000, 1000000, 100000000, 90000000, 'reserved', $3, $4)
+        `,
+        reserveValues
+      );
+      await expect(insertReserve()).rejects.toThrow("ticket_leg_set_incomplete");
+
+      await client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status) VALUES ($1, $2, 'pending')",
+        [ticketId, quoteLegIds[1]]
+      );
+      await expect(insertReserve()).resolves.toBeDefined();
+      await expect(client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status) VALUES ($1, $2, 'pending')",
+        [ticketId, quoteLegIds[0]]
+      )).rejects.toThrow("ticket_leg_set_immutable");
+    });
+  });
+
   it("creates a claimable partial-void win from the frozen void-leg price exactly once", async (context) => {
     await withDisposableSchema(context, async (client) => {
       const seeded = await seedPlayMoneyTicket(client);
@@ -346,6 +537,17 @@ postgresDescribe("per-leg void settlement PostgreSQL integration", () => {
         [economicRow.quote_leg_id]
       )).rejects.toThrow("accepted_quote_leg_immutable");
       await expect(client.query(
+        `
+          INSERT INTO quote_legs (
+            quote_id, market_id, outcome_id, market_snapshot_id, outcome, quoted_price_bps
+          )
+          SELECT quote_id, market_id, outcome_id, market_snapshot_id, outcome, quoted_price_bps
+          FROM quote_legs
+          WHERE id = $1
+        `,
+        [economicRow.quote_leg_id]
+      )).rejects.toThrow("accepted_quote_leg_immutable");
+      await expect(client.query(
         "UPDATE ticket_legs SET accepted_price_bps = accepted_price_bps + 1 WHERE ticket_id = $1 AND quote_leg_id = $2",
         [seeded.ticketId, economicRow.quote_leg_id]
       )).rejects.toThrow("ticket_leg_economic_identity_immutable");
@@ -356,7 +558,11 @@ postgresDescribe("per-leg void settlement PostgreSQL integration", () => {
       await expect(client.query(
         "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status, accepted_price_bps) VALUES ($1, $2, 'pending', 1)",
         [seeded.ticketId, economicRow.quote_leg_id]
-      )).rejects.toThrow("ticket_leg_accepted_terms_invalid");
+      )).rejects.toThrow("ticket_leg_set_immutable");
+      await expect(client.query(
+        "INSERT INTO ticket_legs (ticket_id, quote_leg_id, status, accepted_price_bps) VALUES ($1, $2, 'pending', 4000)",
+        [seeded.ticketId, economicRow.quote_leg_id]
+      )).rejects.toThrow("ticket_leg_set_immutable");
       await expect(client.query(
         "DELETE FROM ticket_legs WHERE ticket_id = $1 AND quote_leg_id = $2",
         [seeded.ticketId, economicRow.quote_leg_id]

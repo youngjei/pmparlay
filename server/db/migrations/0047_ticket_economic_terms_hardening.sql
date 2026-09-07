@@ -32,12 +32,16 @@ ALTER TABLE ticket_legs
   ADD CONSTRAINT ticket_legs_accepted_price_bps_check
   CHECK (accepted_price_bps >= 0 AND accepted_price_bps <= 10000);
 
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_legs_ticket_quote_leg_unique_idx
+  ON ticket_legs (ticket_id, quote_leg_id);
+
 CREATE OR REPLACE FUNCTION freeze_ticket_leg_accepted_price()
 RETURNS trigger AS $$
 DECLARE
   source_price_bps INTEGER;
   source_quote_id UUID;
   ticket_quote_id UUID;
+  ticket_terms_frozen BOOLEAN;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'ticket_leg_economic_identity_immutable:%', OLD.id;
@@ -59,10 +63,21 @@ BEGIN
     FROM quote_legs
     WHERE id = NEW.quote_leg_id;
 
-    SELECT quote_id
-    INTO ticket_quote_id
+    SELECT
+      tickets.quote_id,
+      EXISTS (
+        SELECT 1
+        FROM ticket_reserves
+        WHERE ticket_reserves.ticket_id = tickets.id
+      )
+    INTO ticket_quote_id, ticket_terms_frozen
     FROM tickets
-    WHERE id = NEW.ticket_id;
+    WHERE tickets.id = NEW.ticket_id
+    FOR UPDATE OF tickets;
+
+    IF ticket_terms_frozen THEN
+      RAISE EXCEPTION 'ticket_leg_set_immutable:%', NEW.ticket_id;
+    END IF;
 
     IF source_price_bps IS NULL
       OR source_quote_id IS DISTINCT FROM ticket_quote_id
@@ -146,35 +161,102 @@ EXECUTE FUNCTION prevent_accepted_quote_mutation();
 CREATE OR REPLACE FUNCTION prevent_accepted_quote_leg_mutation()
 RETURNS trigger AS $$
 DECLARE
-  target_quote_id UUID := COALESCE(OLD.quote_id, NEW.quote_id);
+  old_quote_id UUID;
+  new_quote_id UUID;
+  target_leg_id UUID;
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    new_quote_id := NEW.quote_id;
+    target_leg_id := NEW.id;
+  ELSIF TG_OP = 'UPDATE' THEN
+    old_quote_id := OLD.quote_id;
+    new_quote_id := NEW.quote_id;
+    target_leg_id := OLD.id;
+  ELSE
+    old_quote_id := OLD.quote_id;
+    target_leg_id := OLD.id;
+  END IF;
+
+  -- Serialize leg changes with quote acceptance, which locks the same parent row.
+  PERFORM 1
+  FROM quotes
+  WHERE id IN (old_quote_id, new_quote_id)
+  ORDER BY id
+  FOR UPDATE;
+
   IF EXISTS (
     SELECT 1
     FROM quotes
-    WHERE id = target_quote_id
-      AND status = 'accepted'
-  ) OR EXISTS (
+    WHERE id IN (old_quote_id, new_quote_id)
+      AND (
+        status = 'accepted'
+        OR EXISTS (SELECT 1 FROM tickets WHERE tickets.quote_id = quotes.id)
+      )
+  ) OR (TG_OP <> 'INSERT' AND EXISTS (
     SELECT 1
     FROM ticket_legs
     WHERE quote_leg_id = OLD.id
-  )
+  ))
   THEN
-    RAISE EXCEPTION 'accepted_quote_leg_immutable:%', OLD.id;
+    RAISE EXCEPTION 'accepted_quote_leg_immutable:%', target_leg_id;
   END IF;
 
-  RETURN COALESCE(NEW, OLD);
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS accepted_quote_legs_immutable_trigger ON quote_legs;
 CREATE TRIGGER accepted_quote_legs_immutable_trigger
-BEFORE UPDATE OR DELETE ON quote_legs
+BEFORE INSERT OR UPDATE OR DELETE ON quote_legs
 FOR EACH ROW
 EXECUTE FUNCTION prevent_accepted_quote_leg_mutation();
 
 CREATE OR REPLACE FUNCTION prevent_ticket_reserve_economic_mutation()
 RETURNS trigger AS $$
+DECLARE
+  ticket_quote_id UUID;
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    SELECT quote_id
+    INTO ticket_quote_id
+    FROM tickets
+    WHERE id = NEW.ticket_id
+    FOR UPDATE;
+
+    IF ticket_quote_id IS NULL
+      OR NOT EXISTS (
+        SELECT 1
+        FROM quote_legs
+        WHERE quote_legs.quote_id = ticket_quote_id
+      )
+      OR EXISTS (
+        SELECT quote_legs.id
+        FROM quote_legs
+        WHERE quote_legs.quote_id = ticket_quote_id
+        EXCEPT
+        SELECT ticket_legs.quote_leg_id
+        FROM ticket_legs
+        WHERE ticket_legs.ticket_id = NEW.ticket_id
+      )
+      OR EXISTS (
+        SELECT ticket_legs.quote_leg_id
+        FROM ticket_legs
+        WHERE ticket_legs.ticket_id = NEW.ticket_id
+        EXCEPT
+        SELECT quote_legs.id
+        FROM quote_legs
+        WHERE quote_legs.quote_id = ticket_quote_id
+      )
+    THEN
+      RAISE EXCEPTION 'ticket_leg_set_incomplete:%', NEW.ticket_id;
+    END IF;
+
+    RETURN NEW;
+  END IF;
+
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'ticket_reserve_economic_terms_immutable:%', OLD.id;
   END IF;
@@ -200,7 +282,7 @@ $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS ticket_reserves_economic_terms_immutable_trigger ON ticket_reserves;
 CREATE TRIGGER ticket_reserves_economic_terms_immutable_trigger
-BEFORE UPDATE OR DELETE ON ticket_reserves
+BEFORE INSERT OR UPDATE OR DELETE ON ticket_reserves
 FOR EACH ROW
 EXECUTE FUNCTION prevent_ticket_reserve_economic_mutation();
 

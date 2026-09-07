@@ -205,4 +205,33 @@ describe("market indexer job deduplication", () => {
     expect(mocks.markWorkerFailure).toHaveBeenCalledWith("market-worker", error);
     expect(mocks.markWorkerSuccess).not.toHaveBeenCalled();
   });
+
+  it("marks a persisted empty continuation end as a successful cycle", async () => {
+    const catalog = {
+      asOf: "2026-09-07T00:00:00.000Z",
+      source: "polymarket",
+      outcomes: [],
+      tombstones: [],
+      sweep: {
+        resource: "events",
+        expectedGenerationVersion: 7,
+        startedAfterCursor: "final-cursor",
+        attemptedPages: 1,
+        successfulPages: 1,
+        maxPages: 1,
+        complete: false,
+        truncated: false,
+        stoppedReason: "end"
+      }
+    };
+    mocks.getSweepState.mockResolvedValue({ nextCursor: "final-cursor", generationVersion: 7 });
+    mocks.fetchCatalog.mockResolvedValue(catalog);
+    mocks.persistCatalog.mockResolvedValue({ markets: 0, sweepGenerationComplete: true });
+    mocks.markWorkerSuccess.mockResolvedValue(undefined);
+
+    await expect(processMarketIndexCycle()).resolves.toMatchObject({ sweepGenerationComplete: true });
+    expect(mocks.persistCatalog).toHaveBeenCalledWith(catalog, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(mocks.markWorkerSuccess).toHaveBeenCalledWith("market-worker");
+    expect(mocks.markWorkerFailure).not.toHaveBeenCalled();
+  });
 });

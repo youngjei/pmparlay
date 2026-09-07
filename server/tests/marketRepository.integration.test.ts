@@ -197,6 +197,74 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     expect(inProgressState.rows[0].completed_at?.getTime()).toBe(completedState.rows[0].completed_at.getTime());
   });
 
+  it("completes an empty continuation while preserving seen IDs and reconciling missing markets", async () => {
+    await admin.query(`DELETE FROM "${schema}".market_catalog_sweep_state`);
+    await admin.query(`UPDATE "${schema}".markets SET publicly_visible = false`);
+    const baselineAsOf = new Date().toISOString();
+    await repository.persistMarketCatalog(
+      catalog(baselineAsOf, [
+        indexedOutcome("empty-end-seen", 20_000, baselineAsOf),
+        indexedOutcome("empty-end-missing", 10_000, baselineAsOf)
+      ])
+    );
+
+    const firstPageAsOf = new Date(Date.now() + 1_000).toISOString();
+    await repository.persistMarketCatalog(
+      catalog(firstPageAsOf, [indexedOutcome("empty-end-seen", 21_000, firstPageAsOf)], {
+        resource: "events",
+        expectedGenerationVersion: 0,
+        attemptedPages: 1,
+        successfulPages: 1,
+        maxPages: 1,
+        nextCursor: "empty-end-cursor",
+        complete: false,
+        truncated: true,
+        stoppedReason: "page_cap"
+      })
+    );
+
+    const finalPageAsOf = new Date(Date.now() + 2_000).toISOString();
+    const completion = await repository.persistMarketCatalog(
+      catalog(finalPageAsOf, [], {
+        resource: "events",
+        expectedGenerationVersion: 1,
+        startedAfterCursor: "empty-end-cursor",
+        attemptedPages: 1,
+        successfulPages: 1,
+        maxPages: 1,
+        complete: false,
+        truncated: false,
+        stoppedReason: "end"
+      })
+    );
+    const state = await admin.query(
+      `SELECT complete, next_cursor, seen_market_ids FROM "${schema}".market_catalog_sweep_state WHERE source = 'polymarket'`
+    );
+    const visibility = await admin.query<{ source_market_id: string; publicly_visible: boolean }>(
+      `
+        SELECT source_market_id, publicly_visible
+        FROM "${schema}".markets
+        WHERE source_market_id IN ('empty-end-seen', 'empty-end-missing')
+        ORDER BY source_market_id
+      `
+    );
+
+    expect(completion).toMatchObject({
+      sweepGenerationComplete: true,
+      markedMissingMarketsNonPublic: true,
+      missingMarketsMarkedNonPublic: 1
+    });
+    expect(state.rows[0]).toMatchObject({
+      complete: true,
+      next_cursor: null,
+      seen_market_ids: ["empty-end-seen"]
+    });
+    expect(visibility.rows).toEqual([
+      { source_market_id: "empty-end-missing", publicly_visible: false },
+      { source_market_id: "empty-end-seen", publicly_visible: true }
+    ]);
+  });
+
   it("preserves a quote-referenced market and snapshot when the market becomes a tombstone", async () => {
     const asOf = new Date().toISOString();
     await repository.persistMarketCatalog(catalog(asOf, [indexedOutcome("quoted-tombstone", 10_000, asOf)]));

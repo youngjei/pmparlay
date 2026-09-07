@@ -130,7 +130,7 @@ async function seedPendingLeg(client: pg.Client) {
         id, user_id, policy_version_id, status, stake_micro_usd, operation_fee_micro_usd,
         spread_bps, implied_probability_bps, offered_payout_micro_usd, expires_at
       )
-      VALUES ($1, $2, $3, 'accepted', 1000000, 500000, 0, 5000, 2000000, now() + interval '1 hour')
+      VALUES ($1, $2, $3, 'quoted', 1000000, 500000, 0, 5000, 2000000, now() + interval '1 hour')
     `,
     [ids.quote, ids.user, ids.policy]
   );
@@ -140,6 +140,10 @@ async function seedPendingLeg(client: pg.Client) {
       VALUES ($1, $2, $3, $4, $5, 'Yes', 5000)
     `,
     [ids.quoteLeg, ids.quote, ids.market, ids.outcome, ids.snapshot]
+  );
+  await client.query(
+    "UPDATE quotes SET status = 'accepted', accepted_at = now() WHERE id = $1",
+    [ids.quote]
   );
   await client.query(
     `

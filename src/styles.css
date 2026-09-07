@@ -15,8 +15,8 @@
   --line: #d8dfc9;
   --muted: #65705e;
   --yes: #15b86a;
-  --no: #b83939;
-  --no-on-dark: #ff7770;
+  --no: #f23645;
+  --no-on-dark: #ff6b6b;
 }
 
 * {
@@ -123,8 +123,10 @@ summary:focus-visible {
   cursor: pointer;
   font-size: 0.84rem;
   font-weight: 840;
-  min-height: 32px;
+  min-height: 40px;
+  min-width: 0;
   padding: 0 12px;
+  white-space: nowrap;
 }
 
 .top-nav-btn.active {
@@ -2809,6 +2811,7 @@ button.account-row:hover {
 
   .top-nav-btn {
     flex: 1 1 0;
+    padding-inline: 8px;
   }
 
   .account-hero {
@@ -3380,6 +3383,18 @@ button.account-row:hover {
   .mobile-sheet-totals span,
   .mobile-sheet-totals strong {
     font-size: 0.9rem;
+  }
+}
+
+@media (max-width: 360px) {
+  .topbar {
+    column-gap: 8px;
+    padding-inline: 8px;
+  }
+
+  .wallet-pill {
+    font-size: 0.72rem;
+    padding-inline: 8px;
   }
 }
 

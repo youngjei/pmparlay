@@ -209,7 +209,7 @@ export async function setFinancialControlGate(
 }
 
 export async function getActiveFinancialControlGate(
-  client?: pg.PoolClient,
+  client?: Pick<pg.Pool | pg.PoolClient, "query">,
   options: { lock?: boolean } = {}
 ): Promise<FinancialControlGate | undefined> {
   const queryable = client || getPool();

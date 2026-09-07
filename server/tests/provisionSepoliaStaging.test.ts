@@ -6,7 +6,8 @@ import {
   databaseUrlForName,
   redisUrlForStaging,
   resetRecoveryProof,
-  stagingDepositStartBlock
+  stagingDepositStartBlock,
+  stagingShadowVaultProvisioningInput
 } from "../provisionSepoliaStaging";
 
 describe("Sepolia staging provisioning guards", () => {
@@ -44,5 +45,12 @@ describe("Sepolia staging provisioning guards", () => {
     expect(resetRecoveryProof("legwork_sepolia_staging", "abc123")).toBe(
       "legwork_sepolia_staging:abc123\n"
     );
+  });
+
+  it("pins shadow-vault provisioning to the configured Safe and Circle Sepolia USDC", () => {
+    expect(stagingShadowVaultProvisioningInput("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")).toEqual({
+      treasuryAddress: "0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD",
+      tokenAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+    });
   });
 });

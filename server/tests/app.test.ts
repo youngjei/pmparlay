@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp as buildRawApp } from "../app";
 import { config } from "../config";
+import type { PublicLpVaultView } from "../db/lpVaultRepository";
 import { applyAdditionalRiskChecks, clearQuoteStore } from "../quoteService";
 
 type AppDependencies = Parameters<typeof buildRawApp>[0];
@@ -230,6 +231,40 @@ describe("LEGWORK API", () => {
     expect(response.json()).toMatchObject({
       ok: true
     });
+  });
+
+  it("serves the bounded GET-only shadow vault read with public rate limiting and no caching", async () => {
+    const view: PublicLpVaultView = {
+      mode: "shadow",
+      network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
+      depositsEnabled: false,
+      availability: "reconciliation_absent",
+      vault: {
+        id: "00000000-0000-4000-8000-000000000001",
+        key: "founder-sepolia-shadow",
+        name: "LEGWORK Founder Shadow Vault",
+        capitalSource: "founder",
+        custodyModel: "logical_operating_treasury",
+        communityCustody: false,
+        treasuryAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
+      },
+      epoch: null,
+      snapshot: null
+    };
+    const app = buildApp({ getLpVaultPublicView: async () => view });
+    openApps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/lp-vault" });
+    const head = await app.inject({ method: "HEAD", url: "/api/lp-vault" });
+    const post = await app.inject({ method: "POST", url: "/api/lp-vault" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-ratelimit-limit"]).toBe(String(config.RATE_LIMIT_MAX));
+    expect(response.json()).toEqual(view);
+    expect(head.statusCode).toBe(404);
+    expect(post.statusCode).toBe(404);
   });
 
   it("fails production readiness when a required worker is stale", async () => {
@@ -1893,6 +1928,7 @@ describe("LEGWORK API", () => {
           amountPaidUsd: betaAmountPaidUsd,
           potentialPayoutUsd: betaPotentialPayoutUsd,
           claimableAmountUsd: betaPotentialPayoutUsd,
+          settlementPolicyReviewRequired: false,
           accountingMode: "house_book_usdc",
           currency: "USDC",
           legs: []
@@ -1964,6 +2000,7 @@ describe("LEGWORK API", () => {
           amountPaidUsd: betaAmountPaidUsd,
           potentialPayoutUsd: betaPotentialPayoutUsd,
           claimableAmountUsd: betaPotentialPayoutUsd,
+          settlementPolicyReviewRequired: false,
           accountingMode: "house_book_usdc",
           currency: "USDC",
           legs: 2,
@@ -2086,6 +2123,7 @@ describe("LEGWORK API", () => {
         amountPaidUsd: betaAmountPaidUsd,
         potentialPayoutUsd: betaPotentialPayoutUsd,
         claimableAmountUsd: betaPotentialPayoutUsd,
+        settlementPolicyReviewRequired: false,
         accountingMode: "house_book_usdc",
         currency: "USDC",
         purchaseTxHash: "0x1111111111111111111111111111111111111111111111111111111111111111",

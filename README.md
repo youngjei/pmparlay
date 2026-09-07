@@ -64,9 +64,10 @@ docker compose --profile app --profile worker rm -f
 - Build a multi-leg basket and request server-authored quotes.
 - Collect Sepolia USDC payments through a Safe treasury and activate confirmed tickets.
 - Track Portfolio tickets, purchase tx logs, settlement states, and withdrawal requests.
+- Inspect a read-only founder-funded Sepolia LP Vault shadow dashboard with source-linked reserves, full-collateral floors, pending basket capacity, and fail-closed freshness checks.
 - Run deposit and settlement workers in local runtime with heartbeat checks.
 - Enforce launch exposure caps, quote expiry, payment reconciliation, ledger balancing, and ops controls.
 
-The next target is supervised Sepolia staging. Direct-payment recovery, Gamma+CLOB settlement finality, reconciliation, Safe withdrawal, PostgreSQL concurrency, and lifecycle controls are implemented locally. The isolated staging database and zero-balance Safe reconcile exactly; remaining gates include deliberate opening house capital, supervised end-to-end payment and settlement drills, managed deployment infrastructure, external monitoring, and independent QA tracked in `docs/production-roadmap.md`. Ethereum mainnet remains disabled until its treasury, legal/geo, onchain-settlement, security, and operations review is approved.
+The next target is supervised Sepolia staging. Direct-payment recovery, Gamma+CLOB settlement finality, reconciliation, Safe withdrawal, PostgreSQL concurrency, and lifecycle controls are implemented locally. The isolated staging database and zero-balance Safe reconcile exactly; remaining gates include deliberate opening house capital, supervised end-to-end payment and settlement drills, managed deployment infrastructure, external monitoring, and independent QA tracked in `docs/production-roadmap.md`. Ethereum mainnet remains disabled until its treasury, legal/geo, API-settlement, security, and operations review is approved.
 
-See [the supervised Sepolia staging operations runbook](docs/staging-operations.md) for startup, health, drill, incident, backup, and shutdown procedures.
+See [the supervised Sepolia staging operations runbook](docs/staging-operations.md) for startup, health, drill, incident, backup, and shutdown procedures. LP Vault policy, staged implementation gates, formulas, and future publishing notes live in [the LP Vault roadmap](docs/lp-vault-roadmap.md) and [transparency standard](docs/lp-vault-transparency.md).

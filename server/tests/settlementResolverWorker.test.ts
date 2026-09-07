@@ -17,6 +17,7 @@ const pendingLeg = {
   settlementTokenId: "token-yes",
   settlementOutcomeIndex: 0,
   settlementPayoutSlotCount: 2,
+  settlementAuthority: "polygon_ctf" as const,
   endDate: "2026-07-01T00:00:00.000Z",
   status: "pending",
   resolutionState: "pending",
@@ -26,6 +27,45 @@ const pendingLeg = {
 };
 
 describe("settlement resolver worker", () => {
+  it("uses the configured API default when a leg has no settlement authority", async () => {
+    const { settlementAuthority, ...legUsingConfiguredDefault } = pendingLeg;
+    const candidate = {
+      proofId: "proof-1",
+      fingerprint: "candidate-fingerprint",
+      firstObservedAt: "2026-07-06T00:00:00.000Z",
+      observedAt: "2026-07-06T00:01:00.000Z",
+      result: "won" as const
+    };
+    const getLatestApiCandidate = vi.fn(async () => candidate);
+    const observe = vi.fn(async () => true);
+    const resolveLeg = vi.fn(async (_leg, options) => {
+      expect(options).toMatchObject({
+        requireOnchain: false,
+        authority: "polymarket_api",
+        previousApiCandidate: candidate
+      });
+      return {
+        kind: "observe" as const,
+        resolutionState: "resolution_candidate" as const,
+        result: "won" as const,
+        proofKind: "polymarket_api_resolution_candidate",
+        nextCheckSeconds: 30,
+        raw: {}
+      };
+    });
+
+    expect(settlementAuthority).toBe("polygon_ctf");
+    await processSettlementLeg(legUsingConfiguredDefault, {
+      getLatestApiCandidate,
+      recordSettlementObservation: observe,
+      resolveLeg
+    });
+
+    expect(getLatestApiCandidate).toHaveBeenCalledWith("leg-1");
+    expect(resolveLeg).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledOnce();
+  });
+
   it("settles a leg when the resolver returns a final decision", async () => {
     const settle = vi.fn(async () => ({
       ticketLegId: "leg-1",

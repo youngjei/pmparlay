@@ -11,7 +11,7 @@ describe("production Compose invariants", () => {
   });
 
   it("blocks API and worker startup on migrations and settlement-identity backfill", () => {
-    expect(compose).toContain('command: ["sh", "-c", "npm run db:migrate && npm run db:backfill-settlement-identities"]');
+    expect(compose).toContain('command: ["sh", "-c", "npm run db:migrate && npm run db:backfill-settlement-identities && npm run db:provision-lp-vault-shadow"]');
     expect(compose.match(/migrate:\n\s+condition: service_completed_successfully/g)?.length).toBeGreaterThanOrEqual(6);
   });
 

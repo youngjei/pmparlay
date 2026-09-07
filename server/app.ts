@@ -12,6 +12,7 @@ import { getAccountSummary } from "./db/accountRepository";
 import { checkDatabase } from "./db/client";
 import { exposureChecksForQuote, listOpenMarketExposure } from "./db/exposureRepository";
 import { completeIdempotencyKey, reserveIdempotencyKey } from "./db/idempotencyRepository";
+import { getLpVaultPublicView, unavailableLpVaultPublicView } from "./db/lpVaultRepository";
 import { getPersistedMarketCatalogPage, getPersistedMarketOutcomesByIds } from "./db/marketRepository";
 import {
   createQuotePaymentIntent,
@@ -87,6 +88,7 @@ type AppDependencies = {
   buildAndPersistSafeWithdrawalProposal?: typeof buildAndPersistSafeWithdrawalProposal;
   getFinancialGateDecision?: typeof getFinancialGateDecision;
   getLatestReconciliationSnapshot?: typeof getLatestReconciliationSnapshot;
+  getLpVaultPublicView?: typeof getLpVaultPublicView;
   createQuotePaymentIntent?: typeof createQuotePaymentIntent;
   getQuotePaymentIntent?: typeof getQuotePaymentIntent;
   listPendingQuotePayments?: typeof listPendingQuotePayments;
@@ -123,6 +125,7 @@ const claimableTicketsQuerySchema = z.object({
 });
 
 const routeRateLimits = {
+  publicRead: { max: config.RATE_LIMIT_MAX, timeWindow: config.RATE_LIMIT_WINDOW },
   authSync: { max: 8, timeWindow: "1 minute" },
   quoteCreation: { max: 20, timeWindow: "1 minute" },
   payment: { max: 10, timeWindow: "1 minute" },
@@ -319,6 +322,7 @@ export function buildApp(dependencies: AppDependencies = {}) {
   const setWithdrawalSent = dependencies.markWithdrawalSent || markWithdrawalSent;
   const proposeSafeWithdrawal = dependencies.buildAndPersistSafeWithdrawalProposal || buildAndPersistSafeWithdrawalProposal;
   const loadFinancialGateDecision = dependencies.getFinancialGateDecision || getFinancialGateDecision;
+  const loadLpVaultPublicView = dependencies.getLpVaultPublicView || getLpVaultPublicView;
   const createPaymentIntent = dependencies.createQuotePaymentIntent || createQuotePaymentIntent;
   const loadPaymentIntent = dependencies.getQuotePaymentIntent || getQuotePaymentIntent;
   const loadPendingQuotePayments = dependencies.listPendingQuotePayments || listPendingQuotePayments;
@@ -332,6 +336,9 @@ export function buildApp(dependencies: AppDependencies = {}) {
   const serveFrontend = dependencies.serveFrontend ?? config.NODE_ENV === "production";
   const app = Fastify({
     bodyLimit: 64 * 1024,
+    trustProxy: config.TRUST_PROXY_HOPS > 0
+      ? (_address: string, hop: number) => hop < config.TRUST_PROXY_HOPS
+      : false,
     logger: config.NODE_ENV === "test" ? false : { level: config.NODE_ENV === "production" ? "info" : "debug" }
   });
 
@@ -494,6 +501,26 @@ export function buildApp(dependencies: AppDependencies = {}) {
       };
     }
   });
+
+  app.get(
+    "/api/lp-vault",
+    { exposeHeadRoute: false, config: { rateLimit: routeRateLimits.publicRead } },
+    async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      if (!config.DATABASE_URL && !dependencies.getLpVaultPublicView) {
+        reply.status(503);
+        return unavailableLpVaultPublicView();
+      }
+
+      try {
+        return await loadLpVaultPublicView();
+      } catch (error) {
+        request.log.error(error);
+        reply.status(503);
+        return unavailableLpVaultPublicView();
+      }
+    }
+  );
 
   app.get("/api/markets", async (request, reply) => {
     const controller = new AbortController();

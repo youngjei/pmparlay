@@ -1,0 +1,12 @@
+title = "LEGWORK secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Public Ethereum addresses are identifiers, not credentials"
+  regexTarget = "secret"
+  regexes = ['''(?i)^0x[0-9a-f]{40}$''']

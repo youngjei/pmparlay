@@ -228,6 +228,9 @@ describe("financial reconciliation", () => {
       }
       if (text.includes("GROUP BY ledger_accounts.account_type")) return { rows: [] };
       if (text.includes("FROM ticket_reserves")) return { rows: [{ stake: "0", operationFee: "0", reserve: "0" }] };
+      if (text.includes("FROM quote_payment_exposure_reservations")) {
+        return { rows: [{ reservationCount: "1", stake: "1000000", grossPayout: "4000000", operatingCharge: "4000000" }] };
+      }
       if (text.includes("account_type NOT LIKE")) return { rows: [{ balance: "5000000" }] };
       if (text.includes("FROM withdrawal_requests")) return { rows: [{ pending: "0" }] };
       if (text.includes("INSERT INTO financial_reconciliation_snapshots")) return { rows: [blockedSnapshotRow()] };
@@ -265,5 +268,12 @@ describe("financial reconciliation", () => {
     expect(db.clientQuery.mock.calls[controlLockIndex][1]).toEqual(["financial-control-gate:global"]);
     expect(controlLockIndex).toBeLessThan(reconciliationLockIndex);
     expect(reconciliationLockIndex).toBeLessThan(insertIndex);
+    const insertParameters = db.clientQuery.mock.calls[insertIndex][1];
+    expect(JSON.parse(insertParameters[16])).toMatchObject({
+      softReservationCount: "1",
+      softReservationStakeMicroUnits: "1000000",
+      softReservationGrossPayoutMicroUnits: "4000000",
+      softReservationOperatingChargeMicroUnits: "4000000"
+    });
   });
 });

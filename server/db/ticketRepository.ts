@@ -30,6 +30,7 @@ export type TicketDetail = {
   amountPaidUsd: number;
   potentialPayoutUsd: number;
   claimableAmountUsd: number;
+  settlementPolicyReviewRequired: boolean;
   accountingMode: string;
   currency: string;
   purchaseTxHash?: string;
@@ -116,9 +117,9 @@ function microUsdToUsd(value: string | number | bigint | null) {
   return Number(BigInt(value || 0)) / 1_000_000;
 }
 
-function claimableAmountUsd(stakeMicroUsd: string, offeredPayoutMicroUsd: string, hasVoidedLeg: boolean) {
-  const claimableMicroUsd = hasVoidedLeg ? BigInt(stakeMicroUsd) : BigInt(offeredPayoutMicroUsd);
-  return microUsdToUsd(claimableMicroUsd);
+function claimableAmountUsd(status: string, offeredPayoutMicroUsd: string, finalPayoutMicroUsd?: string | null) {
+  if (status !== "claimable" && status !== "paid") return 0;
+  return microUsdToUsd(finalPayoutMicroUsd ?? offeredPayoutMicroUsd);
 }
 
 const cursorTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{6})Z$/;
@@ -578,8 +579,8 @@ export async function acceptQuoteInTransaction(client: pg.PoolClient, quoteId: s
   );
   await client.query(
     `
-      INSERT INTO ticket_legs (ticket_id, quote_leg_id, status)
-      SELECT $1, quote_legs.id, 'pending'
+      INSERT INTO ticket_legs (ticket_id, quote_leg_id, status, accepted_price_bps)
+      SELECT $1, quote_legs.id, 'pending', quote_legs.quoted_price_bps
       FROM quote_legs
       WHERE quote_legs.quote_id = $2
     `,
@@ -721,7 +722,8 @@ export async function listTickets(userId: string) {
     lostLegs: string;
     voidedLegs: string;
     disputedLegs: string;
-    hasVoidedLeg: boolean;
+    finalPayoutMicroUsd: string | null;
+    settlementPolicyReviewRequired: boolean;
   }>(
     `
       SELECT
@@ -730,9 +732,9 @@ export async function listTickets(userId: string) {
         tickets.status,
         tickets.created_at AS "createdAt",
         tickets.updated_at AS "updatedAt",
-        quotes.stake_micro_usd::text AS "stakeMicroUsd",
-        quotes.operation_fee_micro_usd::text AS "operationFeeMicroUsd",
-        quotes.offered_payout_micro_usd::text AS "potentialPayoutMicroUsd",
+        COALESCE(ticket_reserves.stake_micro_units, quotes.stake_micro_usd)::text AS "stakeMicroUsd",
+        COALESCE(ticket_reserves.operation_fee_micro_units, quotes.operation_fee_micro_usd)::text AS "operationFeeMicroUsd",
+        COALESCE(ticket_reserves.offered_payout_micro_units, quotes.offered_payout_micro_usd)::text AS "potentialPayoutMicroUsd",
         tickets.accounting_mode AS "accountingMode",
         tickets.funding_currency AS "currency",
         count(ticket_legs.id)::text AS legs,
@@ -741,12 +743,19 @@ export async function listTickets(userId: string) {
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'lost')::text AS "lostLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'voided')::text AS "voidedLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'disputed')::text AS "disputedLegs",
-        COALESCE(bool_or(ticket_legs.status = 'voided'), false) AS "hasVoidedLeg"
+        ticket_settlement_summaries.final_payout_micro_units::text AS "finalPayoutMicroUsd",
+        (ticket_settlement_policy_quarantines.id IS NOT NULL) AS "settlementPolicyReviewRequired"
       FROM tickets
       JOIN quotes ON quotes.id = tickets.quote_id
+      LEFT JOIN ticket_reserves ON ticket_reserves.ticket_id = tickets.id
       LEFT JOIN ticket_legs ON ticket_legs.ticket_id = tickets.id
+      LEFT JOIN ticket_settlement_summaries ON ticket_settlement_summaries.ticket_id = tickets.id
+      LEFT JOIN ticket_settlement_policy_quarantines
+        ON ticket_settlement_policy_quarantines.ticket_id = tickets.id
+        AND ticket_settlement_policy_quarantines.resolved_at IS NULL
       WHERE tickets.user_id = $1
-      GROUP BY tickets.id, quotes.id
+      GROUP BY tickets.id, quotes.id, ticket_reserves.id, ticket_settlement_summaries.id,
+        ticket_settlement_policy_quarantines.id
       ORDER BY tickets.created_at DESC
       LIMIT 50
     `,
@@ -763,7 +772,10 @@ export async function listTickets(userId: string) {
     operationFeeUsd: microUsdToUsd(row.operationFeeMicroUsd),
     amountPaidUsd: microUsdToUsd(BigInt(row.stakeMicroUsd) + BigInt(row.operationFeeMicroUsd)),
     potentialPayoutUsd: microUsdToUsd(row.potentialPayoutMicroUsd),
-    claimableAmountUsd: claimableAmountUsd(row.stakeMicroUsd, row.potentialPayoutMicroUsd, row.hasVoidedLeg),
+    claimableAmountUsd: row.settlementPolicyReviewRequired
+      ? 0
+      : claimableAmountUsd(row.status, row.potentialPayoutMicroUsd, row.finalPayoutMicroUsd),
+    settlementPolicyReviewRequired: Boolean(row.settlementPolicyReviewRequired),
     accountingMode: row.accountingMode,
     currency: row.currency,
     legs: Number(row.legs),
@@ -801,7 +813,7 @@ export async function listClaimableTickets(userId: string, input: ListClaimableT
     lostLegs: string;
     voidedLegs: string;
     disputedLegs: string;
-    hasVoidedLeg: boolean;
+    finalPayoutMicroUsd: string | null;
   }>(
     `
       SELECT
@@ -811,9 +823,9 @@ export async function listClaimableTickets(userId: string, input: ListClaimableT
         tickets.created_at AS "createdAt",
         to_char(tickets.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorCreatedAt",
         tickets.updated_at AS "updatedAt",
-        quotes.stake_micro_usd::text AS "stakeMicroUsd",
-        quotes.operation_fee_micro_usd::text AS "operationFeeMicroUsd",
-        quotes.offered_payout_micro_usd::text AS "potentialPayoutMicroUsd",
+        COALESCE(ticket_reserves.stake_micro_units, quotes.stake_micro_usd)::text AS "stakeMicroUsd",
+        COALESCE(ticket_reserves.operation_fee_micro_units, quotes.operation_fee_micro_usd)::text AS "operationFeeMicroUsd",
+        COALESCE(ticket_reserves.offered_payout_micro_units, quotes.offered_payout_micro_usd)::text AS "potentialPayoutMicroUsd",
         tickets.accounting_mode AS "accountingMode",
         tickets.funding_currency AS "currency",
         count(ticket_legs.id)::text AS legs,
@@ -822,18 +834,24 @@ export async function listClaimableTickets(userId: string, input: ListClaimableT
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'lost')::text AS "lostLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'voided')::text AS "voidedLegs",
         count(ticket_legs.id) FILTER (WHERE ticket_legs.status = 'disputed')::text AS "disputedLegs",
-        COALESCE(bool_or(ticket_legs.status = 'voided'), false) AS "hasVoidedLeg"
+        ticket_settlement_summaries.final_payout_micro_units::text AS "finalPayoutMicroUsd"
       FROM tickets
       JOIN quotes ON quotes.id = tickets.quote_id
+      LEFT JOIN ticket_reserves ON ticket_reserves.ticket_id = tickets.id
       LEFT JOIN ticket_legs ON ticket_legs.ticket_id = tickets.id
+      LEFT JOIN ticket_settlement_summaries ON ticket_settlement_summaries.ticket_id = tickets.id
+      LEFT JOIN ticket_settlement_policy_quarantines
+        ON ticket_settlement_policy_quarantines.ticket_id = tickets.id
+        AND ticket_settlement_policy_quarantines.resolved_at IS NULL
       WHERE tickets.user_id = $1
         AND tickets.status = 'claimable'
+        AND ticket_settlement_policy_quarantines.id IS NULL
         AND (
           $2::timestamptz IS NULL
           OR tickets.created_at < $2::timestamptz
           OR (tickets.created_at = $2::timestamptz AND tickets.id < $3::uuid)
         )
-      GROUP BY tickets.id, quotes.id
+      GROUP BY tickets.id, quotes.id, ticket_reserves.id, ticket_settlement_summaries.id
       ORDER BY tickets.created_at DESC, tickets.id DESC
       LIMIT $4
     `,
@@ -855,7 +873,7 @@ export async function listClaimableTickets(userId: string, input: ListClaimableT
       operationFeeUsd: microUsdToUsd(row.operationFeeMicroUsd),
       amountPaidUsd: microUsdToUsd(BigInt(row.stakeMicroUsd) + BigInt(row.operationFeeMicroUsd)),
       potentialPayoutUsd: microUsdToUsd(row.potentialPayoutMicroUsd),
-      claimableAmountUsd: claimableAmountUsd(row.stakeMicroUsd, row.potentialPayoutMicroUsd, row.hasVoidedLeg),
+      claimableAmountUsd: claimableAmountUsd(row.status, row.potentialPayoutMicroUsd, row.finalPayoutMicroUsd),
       accountingMode: row.accountingMode,
       currency: row.currency,
       legs: Number(row.legs),
@@ -889,7 +907,8 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
     currency: string;
     purchaseTxHash: string | null;
     purchaseChainId: number | null;
-    hasVoidedLeg: boolean;
+    finalPayoutMicroUsd: string | null;
+    settlementPolicyReviewRequired: boolean;
   }>(
     `
       SELECT
@@ -898,21 +917,24 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
         tickets.status,
         tickets.created_at AS "createdAt",
         tickets.updated_at AS "updatedAt",
-        quotes.stake_micro_usd::text AS "stakeMicroUsd",
-        quotes.operation_fee_micro_usd::text AS "operationFeeMicroUsd",
-        quotes.offered_payout_micro_usd::text AS "potentialPayoutMicroUsd",
+        COALESCE(ticket_reserves.stake_micro_units, quotes.stake_micro_usd)::text AS "stakeMicroUsd",
+        COALESCE(ticket_reserves.operation_fee_micro_units, quotes.operation_fee_micro_usd)::text AS "operationFeeMicroUsd",
+        COALESCE(ticket_reserves.offered_payout_micro_units, quotes.offered_payout_micro_usd)::text AS "potentialPayoutMicroUsd",
         tickets.accounting_mode AS "accountingMode",
         tickets.funding_currency AS "currency",
         purchase_payment.tx_hash AS "purchaseTxHash",
         purchase_payment.chain_id AS "purchaseChainId",
+        ticket_settlement_summaries.final_payout_micro_units::text AS "finalPayoutMicroUsd",
         EXISTS (
           SELECT 1
-          FROM ticket_legs AS settlement_legs
-          WHERE settlement_legs.ticket_id = tickets.id
-            AND settlement_legs.status = 'voided'
-        ) AS "hasVoidedLeg"
+          FROM ticket_settlement_policy_quarantines
+          WHERE ticket_settlement_policy_quarantines.ticket_id = tickets.id
+            AND ticket_settlement_policy_quarantines.resolved_at IS NULL
+        ) AS "settlementPolicyReviewRequired"
       FROM tickets
       JOIN quotes ON quotes.id = tickets.quote_id
+      LEFT JOIN ticket_reserves ON ticket_reserves.ticket_id = tickets.id
+      LEFT JOIN ticket_settlement_summaries ON ticket_settlement_summaries.ticket_id = tickets.id
       LEFT JOIN LATERAL (
         SELECT quote_payment_intents.tx_hash, quote_payment_intents.chain_id
         FROM quote_payment_intents
@@ -976,7 +998,10 @@ export async function getTicket(ticketId: string, userId: string): Promise<Ticke
     operationFeeUsd: Number(ticket.operationFeeMicroUsd) / 1_000_000,
     amountPaidUsd: microUsdToUsd(BigInt(ticket.stakeMicroUsd) + BigInt(ticket.operationFeeMicroUsd)),
     potentialPayoutUsd: Number(ticket.potentialPayoutMicroUsd) / 1_000_000,
-    claimableAmountUsd: claimableAmountUsd(ticket.stakeMicroUsd, ticket.potentialPayoutMicroUsd, ticket.hasVoidedLeg),
+    claimableAmountUsd: ticket.settlementPolicyReviewRequired
+      ? 0
+      : claimableAmountUsd(ticket.status, ticket.potentialPayoutMicroUsd, ticket.finalPayoutMicroUsd),
+    settlementPolicyReviewRequired: Boolean(ticket.settlementPolicyReviewRequired),
     accountingMode: ticket.accountingMode,
     currency: ticket.currency,
     purchaseTxHash: ticket.purchaseTxHash || undefined,

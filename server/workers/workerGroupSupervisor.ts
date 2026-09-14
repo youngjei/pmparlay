@@ -6,7 +6,8 @@ const workerEntrypoints = {
   outbox: fileURLToPath(new URL("./outboxWorker.ts", import.meta.url)),
   deposits: fileURLToPath(new URL("./usdcDepositScannerWorker.ts", import.meta.url)),
   settlements: fileURLToPath(new URL("./settlementResolverWorker.ts", import.meta.url)),
-  reconciliation: fileURLToPath(new URL("./reconciliationWorker.ts", import.meta.url))
+  reconciliation: fileURLToPath(new URL("./reconciliationWorker.ts", import.meta.url)),
+  lpVaultAccounting: fileURLToPath(new URL("./lpVaultAccountingWorker.ts", import.meta.url))
 } as const;
 
 export const workerGroups = {
@@ -17,7 +18,8 @@ export const workerGroups = {
   financial: [
     { name: "deposits", entrypoint: workerEntrypoints.deposits },
     { name: "settlements", entrypoint: workerEntrypoints.settlements },
-    { name: "reconciliation", entrypoint: workerEntrypoints.reconciliation }
+    { name: "reconciliation", entrypoint: workerEntrypoints.reconciliation },
+    { name: "lp-vault-accounting", entrypoint: workerEntrypoints.lpVaultAccounting }
   ]
 } as const;
 

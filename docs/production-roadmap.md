@@ -1,7 +1,7 @@
 # LEGWORK Production Roadmap
 
 Status: Canonical
-Last updated: 2026-09-04
+Last updated: 2026-09-12
 
 The immediate release target is supervised Sepolia staging. Mainnet gates are intentionally revisited immediately before an invite-only Ethereum launch.
 
@@ -12,7 +12,7 @@ The immediate release target is supervised Sepolia staging. Mainnet gates are in
 - Phase 4 core ledger, deposit, claim, withdrawal, Safe proposal, reconciliation, supervised house-funding evidence, transfer ownership, and reorg compensation controls are implemented. Financial workers have success-aware health checks and PostgreSQL singleton leases. The isolated staging database is the canonical financial test environment. Its Safe and ledger now reconcile from zero; a new deliberate opening-capital transfer still must be sent and recorded. House-funding operator labels are audit metadata, not authenticated dual control.
 - Phase 5 is partial. Route limits, Redis fail-closed behavior, production configuration guards, secret scanning, CI, success-aware runtime health, supervised runbooks, and a local backup restore rehearsal exist. Anonymous frontend entry code is below a 250 KiB gzip budget and the deferred wallet runtime is below a 650 KiB gzip budget, with CI and Playwright regression gates. Verified operator RBAC, external monitoring, managed backup/PITR rehearsal against the current schema, and audited repair tooling remain.
 - Phase 6 is deployed on the approved small-scale Railway topology with a public web/API service, managed Postgres and Redis, and grouped market/outbox and financial workers. Readiness verifies fresh successful heartbeats for market, deposit, reconciliation, and settlement processing. Opening funding, the automated burner-wallet lifecycle, real settlement-to-claim, managed backup/PITR rehearsal, and external alerting remain incomplete.
-- Phase 7 has a read-only founder-funded Sepolia shadow-vault foundation: immutable vault/epoch metadata, an idempotent deployment provisioner, deterministic 100%/125% solvency math, pending-payment capacity observation, a fresh-reconciliation public read API, and a source-linked LP Vault transparency surface. Community deposits, LP units, vault-attributed tickets, enforceable LP withdrawal controls, and return reporting remain disabled.
+- Phase 7 has a read-only founder-funded Sepolia shadow-vault foundation: immutable vault and observation-cycle metadata, an idempotent provisioner, deterministic 100%/125% solvency math, pending-payment capacity observation, and a source-linked LP Vault transparency surface. The internal rolling accounting foundation now adds fixed-point shares, pending activation, daily checkpoints, conservative liability marks, economic NAV, estimated/finalized P&L, and shadow FIFO redemptions. Reserve admission requires a confirmation-safe canonical block with source evidence (`asOf`) no more than five minutes old; worker completion time (`processedAt`) is reported separately. Community deposits, dedicated vault custody, vault-attributed tickets, scenario-risk limits, LP transfers, and return reporting remain disabled.
 - Ethereum mainnet remains disabled in code and operations.
 
 ## Phase 0: Source and Specification Baseline
@@ -89,16 +89,16 @@ Exit criteria: repeated end-to-end lifecycle succeeds, reconciliation remains ex
 
 ## Phase 7: LP Vault Shadow Foundation
 
-- Keep founder-funded Sepolia shadow accounting logically separate and label all current figures as global house-book observations rather than LP NAV.
+- Keep founder-funded Sepolia shadow accounting logically separate and label all current figures as global house-book observations rather than LP NAV or redemption liquidity.
 - Publish only fresh, scope-matched reconciliation values with canonical block, treasury, token, timestamp, custody delta, and gate evidence.
 - Calculate the 100% hard solvency floor, 125% operating floor, pending basket capacity, and junior outflow capacity with integer micro-USDC arithmetic.
-- Add immutable serial epoch metadata and a deployment-safe idempotent shadow-vault provisioner.
-- Add the third `LP Vault` product destination with conditional collateral health, stale-value withholding, formula validation, and 320px browser coverage.
-- Define fixed-epoch economics, user-first seniority, pro-rata entitlement calculation, FIFO payout execution, and the no-community-capital boundary.
+- Retain immutable shadow-vault metadata and a deployment-safe idempotent provisioner while keeping the retired serial-epoch model out of the public API.
+- Add the third `LP Vault` product destination with one clear founder-shadow notice, verified assets, coverage, collateral state, progressive evidence, stale-value withholding, formula validation, and 320px browser coverage.
+- Implement and verify rolling daily-cycle accounting: conservative unresolved-liability marks, anti-dilutive pending-deposit activation at the canonical pre-deposit economic-NAV price at 00:00 UTC, fixed non-transferable shares with floating USDC value, estimated marked P&L versus finalized settlement P&L, user-first seniority, separate redemption liquidity, FIFO admission, active 72-hour redemption, binding economic-NAV end valuation and burn, and the no-community-capital boundary.
 
 Exit criteria: the shadow surface and calculations pass unit, PostgreSQL, desktop/mobile browser, security/architecture, and UX review with no critical/high finding; no fake deposit, redemption, APY, NAV, or community-capital action is exposed.
 
-The next LP stage is the replayable shadow book: vault/epoch ticket attribution, payment-intent reservations, append-only book events, vault-specific reconciliation, protocol-fee payables, deterministic scenario exposure, and simulated redemption plans. It must not move money or change customer quotes until its concurrency and replay evidence is reviewed.
+The next LP stage is a deterministic vault-attributed scenario and risk book, followed by founder-funded Sepolia staging drills. It must add immutable ticket and payment-reservation attribution, exact-basket and factor exposure, scenario-loss evaluation, and economic-NAV-based limits without moving funds or changing customer quotes. The founder drills then exercise the already-built accounting lifecycle against realistic custody and settlement evidence before any dedicated vault custody, community deposit, withdrawal, or distribution transfer is considered.
 
 ## Mainnet Review
 

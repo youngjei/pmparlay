@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "dev:local": "sh -c 'trap \"kill 0\" EXIT; npm run dev:api & npm run worker:markets & npm run worker:deposits & npm run worker:reconciliation & npm run worker:settlements & npm run dev'",
+    "dev:local": "sh -c 'trap \"kill 0\" EXIT; npm run dev:api & npm run worker:markets & npm run worker:deposits & npm run worker:reconciliation & npm run worker:settlements & npm run worker:lp-vault-accounting & npm run dev'",
     "dev:api": "tsx watch server/index.ts",
     "db:migrate": "tsx server/db/migrate.ts",
     "db:provision-lp-vault-shadow": "tsx server/provisionLpVaultShadow.ts",
@@ -44,6 +44,7 @@
     "worker:settlements": "tsx server/workers/settlementResolverWorker.ts",
     "worker:deposits": "tsx server/workers/usdcDepositScannerWorker.ts",
     "worker:reconciliation": "tsx server/workers/reconciliationWorker.ts",
+    "worker:lp-vault-accounting": "tsx server/workers/lpVaultAccountingWorker.ts",
     "worker:health": "tsx server/workers/checkHeartbeat.ts",
     "build": "tsc && vite build",
     "typecheck:api": "tsc -p tsconfig.server.json",
@@ -51,7 +52,7 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:financial:postgres": "vitest run server/tests/financialControlsPostgres.test.ts",
-    "test:postgres": "vitest run --maxWorkers=1 server/tests/directPayMigration.test.ts server/tests/financialControlsPostgres.test.ts server/tests/houseFundingMigrationPostgres.test.ts server/tests/lpVaultMigrationPostgres.test.ts server/tests/marketRepository.integration.test.ts server/tests/onchainTransferOwnershipPostgres.test.ts server/tests/onchainTransferClaimConstraintsPostgres.test.ts server/tests/paymentIntentRebindingPostgres.test.ts server/tests/polymarketApiSettlementPostgres.test.ts server/tests/settlementClaimsPostgres.test.ts server/tests/settlementIdentityPostgres.test.ts server/tests/settlementOperationalAlertsPostgres.test.ts server/tests/settlementReplayPostgres.test.ts server/tests/settlementVoidPolicyPostgres.test.ts server/tests/withdrawalCancellationPostgres.test.ts server/tests/workerHeartbeatRepositoryPostgres.test.ts",
+    "test:postgres": "vitest run --maxWorkers=1 server/tests/directPayMigration.test.ts server/tests/financialControlsPostgres.test.ts server/tests/houseFundingMigrationPostgres.test.ts server/tests/lpVaultAccountingMigrationPostgres.test.ts server/tests/lpVaultMigrationPostgres.test.ts server/tests/marketRepository.integration.test.ts server/tests/onchainTransferOwnershipPostgres.test.ts server/tests/onchainTransferClaimConstraintsPostgres.test.ts server/tests/paymentIntentRebindingPostgres.test.ts server/tests/polymarketApiSettlementPostgres.test.ts server/tests/settlementClaimsPostgres.test.ts server/tests/settlementIdentityPostgres.test.ts server/tests/settlementOperationalAlertsPostgres.test.ts server/tests/settlementReplayPostgres.test.ts server/tests/settlementVoidPolicyPostgres.test.ts server/tests/withdrawalCancellationPostgres.test.ts server/tests/workerHeartbeatRepositoryPostgres.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:wallet": "playwright test --config playwright.wallet.config.ts",
     "test:e2e:privy": "PRIVY_E2E=1 playwright test --config playwright.privy.config.ts",
@@ -61,6 +62,7 @@
     "start:worker:settlements": "tsx server/workers/settlementResolverWorker.ts",
     "start:worker:deposits": "tsx server/workers/usdcDepositScannerWorker.ts",
     "start:worker:reconciliation": "tsx server/workers/reconciliationWorker.ts",
+    "start:worker:lp-vault-accounting": "tsx server/workers/lpVaultAccountingWorker.ts",
     "start:worker:market": "tsx server/workers/workerGroupSupervisor.ts market",
     "start:worker:financial": "tsx server/workers/workerGroupSupervisor.ts financial"
   },

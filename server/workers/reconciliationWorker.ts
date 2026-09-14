@@ -4,7 +4,7 @@ import { closePool } from "../db/client";
 import { markWorkerFailure, markWorkerSuccess, sanitizeWorkerFailure } from "../db/workerHeartbeatRepository";
 import { listDepositTreasuryScanConfigs, type DepositTreasuryScanConfig } from "../db/depositRepository";
 import {
-  createReconciliationSnapshot,
+  createReconciliationSnapshotWithLpVaultAdmission,
   reconciliationApiIntegrationHooks,
   type TreasuryAssetSnapshotInput
 } from "../db/reconciliationRepository";
@@ -21,9 +21,10 @@ type ReconciliationWorkerDependencies = {
   getChainId?: () => Promise<Hex>;
   getCurrentBlock?: () => Promise<bigint>;
   getBlockHash?: (blockNumber: bigint) => Promise<Hex>;
+  getBlockTimestamp?: (blockNumber: bigint) => Promise<bigint>;
   getTokenBalance?: (input: { tokenAddress: string; holderAddress: string; blockNumber: bigint }) => Promise<bigint>;
   listTreasuryScanConfigs?: typeof listDepositTreasuryScanConfigs;
-  createSnapshot?: typeof createReconciliationSnapshot;
+  createSnapshot?: typeof createReconciliationSnapshotWithLpVaultAdmission;
   treasuryConfigs?: DepositTreasuryScanConfig[];
   treasuryAssets?: TreasuryAssetSnapshotInput[];
 };
@@ -88,6 +89,12 @@ async function getRpcBlockHash(blockNumber: bigint) {
   return block.hash;
 }
 
+async function getRpcBlockTimestamp(blockNumber: bigint) {
+  const block = await rpc<{ timestamp?: Hex } | null>("eth_getBlockByNumber", [toQuantity(blockNumber), false]);
+  if (!block?.timestamp) throw new Error("ethereum_rpc_block_timestamp_unavailable");
+  return BigInt(block.timestamp);
+}
+
 async function getRpcTokenBalance(input: { tokenAddress: string; holderAddress: string; blockNumber: bigint }) {
   const tokenAddress = getAddress(input.tokenAddress);
   const holderAddress = getAddress(input.holderAddress);
@@ -134,13 +141,13 @@ function uniqueTreasuryAssets(configs: DepositTreasuryScanConfig[]) {
 
 export async function processFinancialReconciliation(dependencies: ReconciliationWorkerDependencies = {}) {
   const usesEthereumRpc = dependencies.treasuryAssets
-    ? !dependencies.getBlockHash
-    : !dependencies.getCurrentBlock || !dependencies.getBlockHash || !dependencies.getTokenBalance;
+    ? !dependencies.getBlockHash || !dependencies.getBlockTimestamp
+    : !dependencies.getCurrentBlock || !dependencies.getBlockHash || !dependencies.getBlockTimestamp || !dependencies.getTokenBalance;
   if (usesEthereumRpc) {
     await requireEthereumRpcChainId(dependencies.getChainId || getRpcChainId, config.SETTLEMENT_CHAIN_ID);
   }
 
-  const createSnapshot = dependencies.createSnapshot || createReconciliationSnapshot;
+  const createSnapshot = dependencies.createSnapshot || createReconciliationSnapshotWithLpVaultAdmission;
   const treasuryConfigs = uniqueTreasuryAssets(
     (dependencies.treasuryConfigs || (await resolveTreasuryConfigs(dependencies.listTreasuryScanConfigs))).filter(
       (item) => item.active && item.chainId === config.SETTLEMENT_CHAIN_ID && item.currency === "USDC"
@@ -153,10 +160,19 @@ export async function processFinancialReconciliation(dependencies: Reconciliatio
 
   const getCurrentBlock = dependencies.getCurrentBlock || getRpcCurrentBlock;
   const getBlockHash = dependencies.getBlockHash || getRpcBlockHash;
+  const getBlockTimestamp = dependencies.getBlockTimestamp || getRpcBlockTimestamp;
   const treasuryAssets = dependencies.treasuryAssets || (await (async () => {
     const getTokenBalance = dependencies.getTokenBalance || getRpcTokenBalance;
-    const blockNumber = await getCurrentBlock();
+    const requiredConfirmations=Math.max(...treasuryConfigs.map(item=>item.requiredConfirmations));
+    if(!Number.isSafeInteger(requiredConfirmations)||requiredConfirmations<0)
+      throw new Error("invalid_reconciliation_required_confirmations");
+    const chainHead = await getCurrentBlock();
+    if(chainHead<BigInt(requiredConfirmations)) throw new Error("reconciliation_confirmed_block_unavailable");
+    const blockNumber = chainHead-BigInt(requiredConfirmations);
     const blockHash = await getBlockHash(blockNumber);
+    const blockTimestamp = await getBlockTimestamp(blockNumber);
+    const blockAgeSeconds=BigInt(Math.floor(Date.now()/1000))-blockTimestamp;
+    if(blockAgeSeconds<0n||blockAgeSeconds>300n) throw new Error("reconciliation_chain_evidence_stale");
     return await Promise.all(
       treasuryConfigs.map(async (item) => ({
         chainId: item.chainId,
@@ -169,6 +185,7 @@ export async function processFinancialReconciliation(dependencies: Reconciliatio
         }),
         blockNumber,
         blockHash,
+        blockTimestamp,
         source: "onchain" as const
       }))
     );
@@ -176,12 +193,20 @@ export async function processFinancialReconciliation(dependencies: Reconciliatio
 
   const observedBlockNumbers = new Set(treasuryAssets.map((asset) => asset.blockNumber?.toString()));
   const observedBlockHashes = new Set(treasuryAssets.map((asset) => asset.blockHash?.toLowerCase()));
+  const observedBlockTimestamps = new Set(treasuryAssets.map((asset) => asset.blockTimestamp?.toString()));
   if (observedBlockNumbers.size !== 1 || observedBlockNumbers.has(undefined)) {
     throw new Error("reconciliation_assets_block_mismatch");
   }
   if (observedBlockHashes.size !== 1 || observedBlockHashes.has(undefined)) {
     throw new Error("reconciliation_assets_block_hash_mismatch");
   }
+  if (observedBlockTimestamps.size !== 1 || observedBlockTimestamps.has(undefined)) {
+    throw new Error("reconciliation_assets_block_timestamp_mismatch");
+  }
+  const observedBlockTimestamp=BigInt([...observedBlockTimestamps][0]!);
+  const observedBlockAgeSeconds=BigInt(Math.floor(Date.now()/1000))-observedBlockTimestamp;
+  if(observedBlockAgeSeconds<0n||observedBlockAgeSeconds>300n)
+    throw new Error("reconciliation_chain_evidence_stale");
   const observedBlockNumber = BigInt([...observedBlockNumbers][0]!);
   const expectedBlockHash = [...observedBlockHashes][0]!;
   const canonicalBlockHash = (await getBlockHash(observedBlockNumber)).toLowerCase();
@@ -193,8 +218,7 @@ export async function processFinancialReconciliation(dependencies: Reconciliatio
     currency: "USDC",
     treasuryAssets,
     verifyCanonicalBlock: async ({ blockNumber, blockHash }) => {
-      const immediatelyCanonicalBlockHash = (await getBlockHash(blockNumber)).toLowerCase();
-      if (immediatelyCanonicalBlockHash !== blockHash.toLowerCase()) {
+      if (blockNumber!==observedBlockNumber || blockHash.toLowerCase()!==expectedBlockHash) {
         throw new Error("reconciliation_block_reorged_before_insert");
       }
     }

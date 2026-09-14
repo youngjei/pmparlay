@@ -67,9 +67,11 @@ describe("worker group supervisor", () => {
     expect(harness.children[0]!.kill).not.toHaveBeenCalled();
     expect(harness.children[1]!.kill).toHaveBeenCalledWith("SIGTERM");
     expect(harness.children[2]!.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(harness.children[3]!.kill).toHaveBeenCalledWith("SIGTERM");
 
     harness.children[1]!.emit("exit", null, "SIGTERM");
     harness.children[2]!.emit("exit", null, "SIGTERM");
+    harness.children[3]!.emit("exit", null, "SIGTERM");
     expect(harness.exit).toHaveBeenCalledTimes(1);
     expect(harness.exit).toHaveBeenCalledWith(1);
   });

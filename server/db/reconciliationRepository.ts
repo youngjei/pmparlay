@@ -7,6 +7,10 @@ import {
 } from "../financialGate";
 import { staticStagingTreasuryConfig, usesStaticStagingTreasury } from "../stagingTreasury";
 import { getPool } from "./client";
+import {
+  admitNextLpVaultRedemption,
+  type LpVaultRedemptionAdmissionResult
+} from "./lpVaultAccountingRepository";
 
 export { evaluateReconciliationGate } from "../financialGate";
 
@@ -17,6 +21,7 @@ export type TreasuryAssetSnapshotInput = {
   balanceMicroUnits: bigint | string;
   blockNumber?: bigint;
   blockHash?: string;
+  blockTimestamp?: bigint;
   source: "onchain";
 };
 
@@ -84,6 +89,7 @@ type InternalReconciliationPosition = {
   openStakeMicroUnits: bigint;
   openOperationFeeMicroUnits: bigint;
   openReserveMicroUnits: bigint;
+  grossUnresolvedLiveTicketPayoutMicroUnits: bigint;
   softReservationCount: bigint;
   softReservationStakeMicroUnits: bigint;
   softReservationGrossPayoutMicroUnits: bigint;
@@ -94,12 +100,13 @@ type InternalReconciliationPosition = {
   houseReserveLedgerMicroUnits: bigint;
 };
 
-type TrustedTreasuryAssetSnapshot = Omit<TreasuryAssetSnapshotInput, "balanceMicroUnits" | "blockNumber" | "blockHash"> & {
+type TrustedTreasuryAssetSnapshot = Omit<TreasuryAssetSnapshotInput, "balanceMicroUnits" | "blockNumber" | "blockHash" | "blockTimestamp"> & {
   treasuryAddress: string;
   tokenAddress: string;
   balanceMicroUnits: bigint;
   blockNumber: bigint;
   blockHash: string;
+  blockTimestamp: bigint;
 };
 
 export const reconciliationApiIntegrationHooks = {
@@ -176,10 +183,13 @@ function normalizeTrustedTreasuryAssets(input: {
     if (asset.source !== "onchain") throw new Error("reconciliation_asset_source_untrusted");
     if (asset.blockNumber === undefined) throw new Error("treasury_asset_block_number_required");
     if (!asset.blockHash) throw new Error("treasury_asset_block_hash_required");
+    if (asset.blockTimestamp === undefined) throw new Error("treasury_asset_block_timestamp_required");
     const blockNumber = BigInt(asset.blockNumber);
     if (blockNumber < 0n) throw new Error("invalid_block_number");
     const balanceMicroUnits = toBigInt(asset.balanceMicroUnits);
+    const blockTimestamp = BigInt(asset.blockTimestamp);
     if (balanceMicroUnits < 0n) throw new Error("invalid_treasury_asset_balance");
+    if (blockTimestamp < 0n) throw new Error("invalid_treasury_asset_block_timestamp");
     const treasuryAddress = normalizeAddress(asset.treasuryAddress);
     const tokenAddress = normalizeAddress(asset.tokenAddress);
     if (treasuryAddress !== input.treasuryAddress || tokenAddress !== input.tokenAddress) {
@@ -191,7 +201,8 @@ function normalizeTrustedTreasuryAssets(input: {
       tokenAddress,
       balanceMicroUnits,
       blockNumber,
-      blockHash: normalizeBlockHash(asset.blockHash)
+      blockHash: normalizeBlockHash(asset.blockHash),
+      blockTimestamp
     };
   });
 }
@@ -263,23 +274,30 @@ async function openReservePosition(client: pg.PoolClient) {
     stake: string;
     operationFee: string;
     reserve: string;
+    grossPayout: string;
   }>(
     `
       SELECT
         COALESCE(sum(stake_micro_units), 0)::text AS stake,
         COALESCE(sum(operation_fee_micro_units), 0)::text AS "operationFee",
-        COALESCE(sum(net_liability_micro_units), 0)::text AS reserve
+        COALESCE(sum(net_liability_micro_units), 0)::text AS reserve,
+        COALESCE(sum(offered_payout_micro_units), 0)::text AS "grossPayout"
       FROM ticket_reserves
       WHERE accounting_mode = 'house_book_usdc'
         AND currency = 'USDC'
         AND status = 'reserved'
+        AND NOT EXISTS (
+          SELECT 1 FROM ticket_settlement_summaries summaries
+          WHERE summaries.ticket_id = ticket_reserves.ticket_id
+        )
     `
   );
   const row = result.rows[0];
   return {
     openStakeMicroUnits: toBigInt(row?.stake),
     openOperationFeeMicroUnits: toBigInt(row?.operationFee),
-    openReserveMicroUnits: toBigInt(row?.reserve)
+    openReserveMicroUnits: toBigInt(row?.reserve),
+    grossUnresolvedLiveTicketPayoutMicroUnits: toBigInt(row?.grossPayout)
   };
 }
 
@@ -351,7 +369,7 @@ async function loadInternalPosition(client: pg.PoolClient): Promise<InternalReco
   };
 }
 
-export async function createReconciliationSnapshot(input: {
+export type CreateReconciliationSnapshotInput = {
   source: "worker";
   chainId: number;
   currency?: "USDC";
@@ -359,15 +377,17 @@ export async function createReconciliationSnapshot(input: {
   verifyCanonicalBlock: CanonicalBlockVerifier;
   driftToleranceMicroUnits?: bigint;
   operationWarnToleranceMicroUnits?: bigint;
-}) {
+};
+
+async function createReconciliationSnapshotInTransaction(
+  client:pg.PoolClient,
+  input:CreateReconciliationSnapshotInput
+) {
   if (input.source !== "worker") throw new Error("reconciliation_snapshot_source_untrusted");
   const currency = input.currency || "USDC";
-  const client = await getPool().connect();
-
-  try {
-    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
-    await lockFinancialControlGateForMutation(client);
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`financial-reconciliation:${input.chainId}:${currency}`]);
+  await lockFinancialControlGateForMutation(client);
+  await client.query("SELECT set_config('legwork.financial_global_exclusive_lock', 'held', true)");
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`financial-reconciliation:${input.chainId}:${currency}`]);
     const scope = await loadActiveReconciliationScope(client, input.chainId);
     const treasuryAssets = normalizeTrustedTreasuryAssets({
       chainId: input.chainId,
@@ -375,6 +395,10 @@ export async function createReconciliationSnapshot(input: {
       ...scope
     });
     const position = await loadInternalPosition(client);
+    if (position.userAvailableMicroUnits < 0n || position.userClaimableMicroUnits < 0n
+      || position.userCheckoutMicroUnits < 0n || position.pendingWithdrawalMicroUnits < 0n) {
+      throw new Error("reconciliation_negative_senior_balance");
+    }
     const treasuryAssetsMicroUnits = treasuryAssets.reduce((sum, asset) => sum + asset.balanceMicroUnits, 0n);
     const knownLiabilitiesMicroUnits =
       position.userAvailableMicroUnits +
@@ -407,6 +431,8 @@ export async function createReconciliationSnapshot(input: {
       softReservationStakeMicroUnits: position.softReservationStakeMicroUnits.toString(),
       softReservationGrossPayoutMicroUnits: position.softReservationGrossPayoutMicroUnits.toString(),
       softReservationOperatingChargeMicroUnits: position.softReservationOperatingChargeMicroUnits.toString(),
+      grossUnresolvedLiveTicketPayoutMicroUnits: position.grossUnresolvedLiveTicketPayoutMicroUnits.toString(),
+      observedBlockTimestamp: treasuryAssets[0].blockTimestamp.toString(),
       treasuryAssetCount: treasuryAssets.length.toString()
     };
     if (observedBlockNumber === undefined || !observedBlockHash) throw new Error("reconciliation_observed_block_missing");
@@ -419,7 +445,8 @@ export async function createReconciliationSnapshot(input: {
       treasuryAssets.map((asset) => ({
         ...asset,
         balanceMicroUnits: asset.balanceMicroUnits.toString(),
-        blockNumber: asset.blockNumber.toString()
+        blockNumber: asset.blockNumber.toString(),
+        blockTimestamp: asset.blockTimestamp.toString()
       }))
     );
     const metricsJson = JSON.stringify(metrics);
@@ -526,14 +553,74 @@ export async function createReconciliationSnapshot(input: {
       ]
     );
 
+  return rowToSnapshot(result.rows[0]);
+}
+
+async function runReconciliationTransaction<T>(run:(client:pg.PoolClient)=>Promise<T>):Promise<T>{
+  const client=await getPool().connect();
+  try{
+    // The exclusive global lock is the serialization boundary. READ COMMITTED
+    // observes any money transaction that committed while this worker waited.
+    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+    const result=await run(client);
     await client.query("COMMIT");
-    return rowToSnapshot(result.rows[0]);
+    return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query("ROLLBACK").catch(()=>undefined);
     throw error;
   } finally {
     client.release();
   }
+}
+
+async function preverifyCanonicalReconciliationInput(
+  input:CreateReconciliationSnapshotInput
+):Promise<CreateReconciliationSnapshotInput>{
+  if(input.source!=="worker") throw new Error("reconciliation_snapshot_source_untrusted");
+  const first=input.treasuryAssets[0];
+  if(!first?.blockHash||first.blockNumber===undefined) throw new Error("reconciliation_observed_block_missing");
+  const blockNumber=BigInt(first.blockNumber);
+  const blockHash=normalizeBlockHash(first.blockHash);
+  if(input.treasuryAssets.some(asset=>asset.blockNumber===undefined||BigInt(asset.blockNumber)!==blockNumber
+    ||!asset.blockHash||normalizeBlockHash(asset.blockHash)!==blockHash)) {
+    throw new Error("reconciliation_assets_block_mismatch");
+  }
+  await input.verifyCanonicalBlock({blockNumber,blockHash});
+  return {...input,verifyCanonicalBlock:async candidate=>{
+    if(candidate.blockNumber!==blockNumber||normalizeBlockHash(candidate.blockHash)!==blockHash)
+      throw new Error("reconciliation_preverified_block_mismatch");
+  }};
+}
+
+export async function createReconciliationSnapshot(input:CreateReconciliationSnapshotInput){
+  const verifiedInput=await preverifyCanonicalReconciliationInput(input);
+  return await runReconciliationTransaction(client=>createReconciliationSnapshotInTransaction(client,verifiedInput));
+}
+
+export type ReconciliationSnapshotWithLpVaultAdmission = FinancialReconciliationSnapshot & {
+  lpVaultAdmission?:LpVaultRedemptionAdmissionResult;
+};
+
+export async function createReconciliationSnapshotWithLpVaultAdmission(
+  input:CreateReconciliationSnapshotInput
+):Promise<ReconciliationSnapshotWithLpVaultAdmission>{
+  const verifiedInput=await preverifyCanonicalReconciliationInput(input);
+  return await runReconciliationTransaction(async client=>{
+    const snapshot=await createReconciliationSnapshotInTransaction(client,verifiedInput);
+    const vaults=await client.query<{id:string}>(`SELECT id FROM lp_vaults
+      WHERE chain_id=$1 AND currency=$2
+        AND lower(treasury_address)=lower($3) AND lower(token_address)=lower($4)
+        AND mode='shadow' AND community_custody=false AND deposits_enabled=false
+      ORDER BY id LIMIT 2 FOR SHARE`,[
+      snapshot.chainId,snapshot.currency,snapshot.scopeTreasuryAddress,snapshot.scopeTokenAddress
+    ]);
+    if(vaults.rows.length>1) throw new Error("lp_vault_reconciliation_scope_ambiguous");
+    if(vaults.rows.length===0) return snapshot;
+    const lpVaultAdmission=await admitNextLpVaultRedemption(client,{
+      vaultId:vaults.rows[0].id,reconciliationSnapshotId:snapshot.id
+    });
+    return {...snapshot,lpVaultAdmission};
+  });
 }
 
 export async function getLatestReconciliationSnapshot(client?: pg.PoolClient) {

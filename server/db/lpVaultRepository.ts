@@ -8,10 +8,16 @@ import { getActiveFinancialControlGate, type FinancialControlGate } from "../fin
 import type { FinancialReconciliationSnapshot } from "./reconciliationRepository";
 import { getPool } from "./client";
 import { evaluateVaultSolvency } from "../vaultSolvency";
+import {
+  loadLatestVerifiedLpVaultAccounting,
+  type VerifiedLpVaultAccounting
+} from "./lpVaultAccountingRepository";
 
 export const FOUNDER_SEPOLIA_SHADOW_VAULT_ID = "00000000-0000-4000-8000-000000000001";
 export const FOUNDER_SEPOLIA_SHADOW_VAULT_KEY = "founder-sepolia-shadow";
 export const LP_VAULT_SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
+export const LP_VAULT_ACCOUNTING_MAX_AGE_MS = 26 * 60 * 60_000;
+export const LP_VAULT_SHARE_UNITS_PER_SHARE = "1000000000000000000";
 
 export type LpVaultAvailability =
   | "available"
@@ -23,7 +29,11 @@ export type LpVaultAvailability =
   | "reconciliation_untrusted"
   | "reconciliation_wrong_scope"
   | "reconciliation_future"
-  | "reconciliation_stale";
+  | "reconciliation_stale"
+  | "accounting_absent"
+  | "accounting_malformed"
+  | "accounting_stale"
+  | "accounting_mismatch";
 
 export type ConfiguredShadowVault = {
   id: string;
@@ -41,16 +51,28 @@ export type ConfiguredShadowVault = {
   createdAt: string;
 };
 
-export type ShadowVaultEpoch = {
-  id: string;
-  vaultId: string;
-  epochNumber: number;
-  status: "planned" | "active" | "runoff" | "finalized" | "canceled";
-  startsAt: string;
-  finalizedAt?: string;
-};
-
 export type GlobalHouseBookReconciliation = FinancialReconciliationSnapshot;
+
+export type PublicLpVaultAccounting = {
+  scope: "rolling_lp_shadow";
+  asOf: string;
+  processedAt: string;
+  cycleCutoffAt: string;
+  reconciliationId: string;
+  bookVersion: string;
+  canonicalBlockNumber: string;
+  canonicalBlockHash: string;
+  economicNavMicroUnits: string;
+  sharePriceMicroUnits: string;
+  shareUnitsPerShare: typeof LP_VAULT_SHARE_UNITS_PER_SHARE;
+  activeShareUnits: string;
+  pendingActivationMicroUnits: string;
+  estimatedPnlMicroUnits: string;
+  finalizedPnlMicroUnits: string;
+  markedUnresolvedLiabilityMicroUnits: string;
+  fullLiabilityFallbackMicroUnits: string;
+  liabilityMarkCoverageBps: number;
+};
 
 export type PublicLpVaultView = {
   mode: "shadow";
@@ -71,16 +93,12 @@ export type PublicLpVaultView = {
     treasuryAddress: string;
     tokenAddress: string;
   };
-  epoch: null | {
-    id: string;
-    number: number;
-    status: ShadowVaultEpoch["status"];
-    startsAt: string;
-    finalizedAt?: string;
-  };
+  accounting: PublicLpVaultAccounting | null;
   snapshot: null | {
     accountingScope: "global_house_book_not_lp_attributed";
+    reconciliationId: string;
     asOf: string;
+    processedAt: string;
     blockNumber: string;
     blockHash: string;
     treasuryAssetsUsd: number;
@@ -108,10 +126,6 @@ export type PublicLpVaultView = {
 };
 
 type VaultRow = Omit<ConfiguredShadowVault, "createdAt"> & { createdAt: Date };
-type EpochRow = Omit<ShadowVaultEpoch, "startsAt" | "finalizedAt"> & {
-  startsAt: Date;
-  finalizedAt: Date | null;
-};
 type ReconciliationRow = Omit<FinancialReconciliationSnapshot, "createdAt"> & { createdAt: Date };
 type Queryable = pg.Pool | pg.PoolClient | pg.Client;
 
@@ -122,7 +136,8 @@ const baseView = {
     name: "Sepolia" as const,
     currency: "USDC" as const
   },
-  depositsEnabled: false as const
+  depositsEnabled: false as const,
+  accounting: null
 };
 
 function normalizedAddress(value: unknown) {
@@ -164,27 +179,14 @@ function publicVault(vault: ConfiguredShadowVault) {
   };
 }
 
-function publicEpoch(epoch?: ShadowVaultEpoch) {
-  if (!epoch) return null;
-  return {
-    id: epoch.id,
-    number: epoch.epochNumber,
-    status: epoch.status,
-    startsAt: epoch.startsAt,
-    ...(epoch.finalizedAt ? { finalizedAt: epoch.finalizedAt } : {})
-  };
-}
-
 function unavailableView(
   availability: Exclude<LpVaultAvailability, "available">,
-  vault?: ConfiguredShadowVault,
-  epoch?: ShadowVaultEpoch
+  vault?: ConfiguredShadowVault
 ): PublicLpVaultView {
   return {
     ...baseView,
     availability,
     vault: vault ? publicVault(vault) : null,
-    epoch: publicEpoch(epoch),
     snapshot: null
   };
 }
@@ -212,19 +214,19 @@ function validConfiguredVault(vault: ConfiguredShadowVault) {
 
 export function deriveLpVaultPublicView(input: {
   vault?: ConfiguredShadowVault;
-  epoch?: ShadowVaultEpoch;
   globalReconciliation?: GlobalHouseBookReconciliation;
+  accounting?: VerifiedLpVaultAccounting;
   financialControlGate?: FinancialControlGate;
   now?: Date;
   maxSnapshotAgeMs?: number;
 }): PublicLpVaultView {
-  const { vault, epoch, globalReconciliation: reconciliation } = input;
+  const { vault, globalReconciliation: reconciliation } = input;
   if (!vault) return unavailableView("vault_unconfigured");
   if (!validConfiguredVault(vault)) return unavailableView("vault_misconfigured");
-  if (!reconciliation) return unavailableView("reconciliation_absent", vault, epoch);
+  if (!reconciliation) return unavailableView("reconciliation_absent", vault);
 
   if (reconciliation.source !== "worker") {
-    return unavailableView("reconciliation_untrusted", vault, epoch);
+    return unavailableView("reconciliation_untrusted", vault);
   }
 
   const blockNumber = exactMicroUnits(reconciliation.observedBlockNumber, { nonnegative: true });
@@ -248,6 +250,8 @@ export function deriveLpVaultPublicView(input: {
   const assetBalance = exactMicroUnits(asset?.balanceMicroUnits, { nonnegative: true });
   const assetBlockNumber = exactMicroUnits(asset?.blockNumber?.toString(), { nonnegative: true });
   const assetBlockHash = typeof asset?.blockHash === "string" ? asset.blockHash.toLowerCase() : "";
+  const assetBlockTimestamp = exactMicroUnits(asset?.blockTimestamp?.toString(), { nonnegative: true });
+  const metricBlockTimestamp = exactMicroUnits(reconciliation.metrics?.observedBlockTimestamp, { nonnegative: true });
   const softReservationStake = exactMicroUnits(reconciliation.metrics?.softReservationStakeMicroUnits, { nonnegative: true });
   const softReservationGrossPayout = exactMicroUnits(reconciliation.metrics?.softReservationGrossPayoutMicroUnits, { nonnegative: true });
   const softReservationCount = exactMicroUnits(reconciliation.metrics?.softReservationCount, { nonnegative: true });
@@ -270,9 +274,12 @@ export function deriveLpVaultPublicView(input: {
     !asset ||
     assetBalance === undefined ||
     assetBlockNumber === undefined ||
+    assetBlockTimestamp === undefined ||
+    metricBlockTimestamp === undefined ||
     assetBalance !== treasuryAssets ||
     assetBlockNumber !== blockNumber ||
     assetBlockHash !== blockHash ||
+    assetBlockTimestamp !== metricBlockTimestamp ||
     softReservationStake === undefined ||
     softReservationGrossPayout === undefined ||
     softReservationCount === undefined ||
@@ -280,7 +287,12 @@ export function deriveLpVaultPublicView(input: {
     !["ready", "blocked"].includes(reconciliation.launchGate) ||
     !["open", "restricted", "blocked"].includes(reconciliation.operationGate)
   ) {
-    return unavailableView("reconciliation_malformed", vault, epoch);
+    return unavailableView("reconciliation_malformed", vault);
+  }
+
+  const sourceAsOfMs = Number(assetBlockTimestamp) * 1_000;
+  if (!Number.isSafeInteger(sourceAsOfMs) || !Number.isFinite(sourceAsOfMs) || createdAtMs < sourceAsOfMs) {
+    return unavailableView("reconciliation_malformed", vault);
   }
 
   const vaultTreasuryAddress = normalizedAddress(vault.treasuryAddress);
@@ -297,7 +309,7 @@ export function deriveLpVaultPublicView(input: {
     !assetTokenAddress ||
     asset.source !== "onchain"
   ) {
-    return unavailableView("reconciliation_untrusted", vault, epoch);
+    return unavailableView("reconciliation_untrusted", vault);
   }
 
   if (
@@ -309,7 +321,7 @@ export function deriveLpVaultPublicView(input: {
     assetTreasuryAddress !== vaultTreasuryAddress ||
     assetTokenAddress !== vaultTokenAddress
   ) {
-    return unavailableView("reconciliation_wrong_scope", vault, epoch);
+    return unavailableView("reconciliation_wrong_scope", vault);
   }
 
   const seniorUserObligations = userAvailable + userClaimable + userCheckout + pendingWithdrawals;
@@ -318,14 +330,14 @@ export function deriveLpVaultPublicView(input: {
     houseEquity !== treasuryAssets - seniorUserObligations - grossUnresolvedPayouts ||
     custodyDelta !== treasuryAssets - internalCustody
   ) {
-    return unavailableView("reconciliation_malformed", vault, epoch);
+    return unavailableView("reconciliation_malformed", vault);
   }
 
   const nowMs = (input.now || new Date()).getTime();
-  const snapshotAgeMs = nowMs - createdAtMs;
-  if (snapshotAgeMs < 0) return unavailableView("reconciliation_future", vault, epoch);
+  const snapshotAgeMs = nowMs - sourceAsOfMs;
+  if (snapshotAgeMs < 0) return unavailableView("reconciliation_future", vault);
   if (snapshotAgeMs > (input.maxSnapshotAgeMs ?? LP_VAULT_SNAPSHOT_MAX_AGE_MS)) {
-    return unavailableView("reconciliation_stale", vault, epoch);
+    return unavailableView("reconciliation_stale", vault);
   }
 
   const solvency = evaluateVaultSolvency({
@@ -349,8 +361,40 @@ export function deriveLpVaultPublicView(input: {
     softReservationOperatingCharge < aggregateChargeFloor ||
     softReservationOperatingCharge > aggregateRoundingCeiling
   ) {
-    return unavailableView("reconciliation_malformed", vault, epoch);
+    return unavailableView("reconciliation_malformed", vault);
   }
+
+  const accounting = input.accounting;
+  if (!accounting) return unavailableView("accounting_absent", vault);
+  if (
+    accounting.vaultId !== vault.id ||
+    accounting.bookVersion <= 0n ||
+    accounting.canonicalBlockNumber < 0n ||
+    !/^0x[0-9a-f]{64}$/i.test(accounting.canonicalBlockHash) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(accounting.cutoffDate) ||
+    accounting.grossAssetsMicroUnits < 0n ||
+    accounting.economicNavMicroUnits < 0n ||
+    accounting.activeShareUnits < 0n ||
+    accounting.pendingActivationMicroUnits < 0n ||
+    accounting.markedUnresolvedLiabilityMicroUnits < 0n ||
+    accounting.fullLiabilityFallbackMicroUnits < 0n ||
+    accounting.fullLiabilityFallbackMicroUnits > accounting.grossUnresolvedPayoutsMicroUnits ||
+    accounting.liabilityMarkCoverageBps < 0 ||
+    accounting.liabilityMarkCoverageBps > 10_000 ||
+    (accounting.activeShareUnits === 0n && accounting.economicNavMicroUnits > 0n)
+  ) {
+    return unavailableView("accounting_malformed", vault);
+  }
+  const accountingAgeMs = nowMs - accounting.asOf.getTime();
+  if (!Number.isFinite(accountingAgeMs) || accountingAgeMs < 0) {
+    return unavailableView("accounting_malformed", vault);
+  }
+  if (accountingAgeMs > LP_VAULT_ACCOUNTING_MAX_AGE_MS) {
+    return unavailableView("accounting_stale", vault);
+  }
+  const sharePriceMicroUnits = accounting.activeShareUnits === 0n
+    ? 1_000_000n
+    : accounting.economicNavMicroUnits * BigInt(LP_VAULT_SHARE_UNITS_PER_SHARE) / accounting.activeShareUnits;
   const seniorOperations = input.financialControlGate?.operationGate === "blocked" || reconciliation.operationGate === "blocked"
     ? "blocked"
     : input.financialControlGate?.operationGate === "restricted" || reconciliation.operationGate === "restricted"
@@ -361,10 +405,31 @@ export function deriveLpVaultPublicView(input: {
     ...baseView,
     availability: "available",
     vault: publicVault(vault),
-    epoch: publicEpoch(epoch),
+    accounting: {
+      scope: "rolling_lp_shadow",
+      asOf: accounting.asOf.toISOString(),
+      processedAt: accounting.processedAt.toISOString(),
+      cycleCutoffAt: `${accounting.cutoffDate}T00:00:00.000Z`,
+      reconciliationId: accounting.reconciliationId,
+      bookVersion: accounting.bookVersion.toString(),
+      canonicalBlockNumber: accounting.canonicalBlockNumber.toString(),
+      canonicalBlockHash: accounting.canonicalBlockHash.toLowerCase(),
+      economicNavMicroUnits: accounting.economicNavMicroUnits.toString(),
+      sharePriceMicroUnits: sharePriceMicroUnits.toString(),
+      shareUnitsPerShare: LP_VAULT_SHARE_UNITS_PER_SHARE,
+      activeShareUnits: accounting.activeShareUnits.toString(),
+      pendingActivationMicroUnits: accounting.pendingActivationMicroUnits.toString(),
+      estimatedPnlMicroUnits: accounting.estimatedPnlMicroUnits.toString(),
+      finalizedPnlMicroUnits: accounting.finalizedPnlMicroUnits.toString(),
+      markedUnresolvedLiabilityMicroUnits: accounting.markedUnresolvedLiabilityMicroUnits.toString(),
+      fullLiabilityFallbackMicroUnits: accounting.fullLiabilityFallbackMicroUnits.toString(),
+      liabilityMarkCoverageBps: accounting.liabilityMarkCoverageBps
+    },
     snapshot: {
       accountingScope: "global_house_book_not_lp_attributed",
-      asOf: new Date(createdAtMs).toISOString(),
+      reconciliationId: reconciliation.id,
+      asOf: new Date(sourceAsOfMs).toISOString(),
+      processedAt: new Date(createdAtMs).toISOString(),
       blockNumber: blockNumber.toString(),
       blockHash,
       treasuryAssetsUsd: microUnitsToUsd(treasuryAssets),
@@ -426,32 +491,6 @@ async function loadConfiguredShadowVault(queryable: Queryable) {
   } satisfies ConfiguredShadowVault;
 }
 
-async function loadLatestShadowEpoch(queryable: Queryable, vaultId: string) {
-  const result = await queryable.query<EpochRow>(
-    `
-      SELECT
-        id,
-        vault_id AS "vaultId",
-        epoch_number AS "epochNumber",
-        status,
-        starts_at AS "startsAt",
-        finalized_at AS "finalizedAt"
-      FROM lp_vault_epochs
-      WHERE vault_id = $1
-      ORDER BY epoch_number DESC
-      LIMIT 1
-    `,
-    [vaultId]
-  );
-  const row = result.rows[0];
-  if (!row) return undefined;
-  return {
-    ...row,
-    startsAt: row.startsAt.toISOString(),
-    finalizedAt: row.finalizedAt?.toISOString()
-  } satisfies ShadowVaultEpoch;
-}
-
 async function loadLatestGlobalHouseBookReconciliation(queryable: Queryable, chainId: number) {
   const result = await queryable.query<ReconciliationRow>(
     `
@@ -504,16 +543,16 @@ export async function getLpVaultPublicView(options: {
   const queryable = options.queryable || getPool();
   const vault = await loadConfiguredShadowVault(queryable);
   if (!vault) return unavailableView("vault_unconfigured");
-  const [epoch, globalReconciliation, financialControlGate] = await Promise.all([
-    loadLatestShadowEpoch(queryable, vault.id),
+  const [globalReconciliation, financialControlGate, accounting] = await Promise.all([
     loadLatestGlobalHouseBookReconciliation(queryable, vault.chainId),
-    getActiveFinancialControlGate(queryable)
+    getActiveFinancialControlGate(queryable),
+    loadLatestVerifiedLpVaultAccounting(vault.id, queryable)
   ]);
   return deriveLpVaultPublicView({
     vault,
-    epoch,
     globalReconciliation,
     financialControlGate,
+    accounting,
     now: options.now,
     maxSnapshotAgeMs: options.maxSnapshotAgeMs
   });

@@ -238,6 +238,7 @@ describe("LEGWORK API", () => {
       mode: "shadow",
       network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
       depositsEnabled: false,
+      accounting: null,
       availability: "reconciliation_absent",
       vault: {
         id: "00000000-0000-4000-8000-000000000001",
@@ -249,7 +250,6 @@ describe("LEGWORK API", () => {
         treasuryAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
         tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
       },
-      epoch: null,
       snapshot: null
     };
     const app = buildApp({ getLpVaultPublicView: async () => view });

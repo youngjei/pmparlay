@@ -249,6 +249,7 @@ describe("financial reconciliation", () => {
             balanceMicroUnits: 4_000_000n,
             blockNumber: 100n,
             blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            blockTimestamp: 1_767_225_600n,
             source: "onchain"
           }
         ],
@@ -263,7 +264,7 @@ describe("financial reconciliation", () => {
     );
     const insertIndex = statements.findIndex((sql) => sql.includes("INSERT INTO financial_reconciliation_snapshots"));
 
-    expect(statements[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    expect(statements[0]).toBe("BEGIN ISOLATION LEVEL READ COMMITTED");
     expect(statements[controlLockIndex]).not.toContain("_shared");
     expect(db.clientQuery.mock.calls[controlLockIndex][1]).toEqual(["financial-control-gate:global"]);
     expect(controlLockIndex).toBeLessThan(reconciliationLockIndex);
@@ -273,7 +274,37 @@ describe("financial reconciliation", () => {
       softReservationCount: "1",
       softReservationStakeMicroUnits: "1000000",
       softReservationGrossPayoutMicroUnits: "4000000",
-      softReservationOperatingChargeMicroUnits: "4000000"
+      softReservationOperatingChargeMicroUnits: "4000000",
+      grossUnresolvedLiveTicketPayoutMicroUnits: "0"
     });
   });
+
+  it.each(["user_usdc_available","user_usdc_claimable","user_usdc_checkout"])(
+    "rejects a negative %s balance before publishing reconciliation evidence",
+    async accountType=>{
+      db.clientQuery.mockImplementation(async(sql:string)=>{
+        const text=String(sql);
+        if(text.includes("FROM treasury_config")) return {rows:[{treasuryAddress,tokenAddress}]};
+        if(text.includes("GROUP BY ledger_accounts.account_type")) return {rows:[{account_type:accountType,balance:"-1"}]};
+        if(text.includes("FROM ticket_reserves")) return {rows:[{stake:"0",operationFee:"0",reserve:"0",grossPayout:"0"}]};
+        if(text.includes("FROM quote_payment_exposure_reservations")) return {rows:[{
+          reservationCount:"0",stake:"0",grossPayout:"0",operatingCharge:"0"
+        }]};
+        if(text.includes("account_type NOT LIKE")) return {rows:[{balance:"0"}]};
+        if(text.includes("FROM withdrawal_requests")) return {rows:[{pending:"0"}]};
+        return {rows:[]};
+      });
+
+      await expect(createReconciliationSnapshot({
+        source:"worker",
+        chainId:11155111,
+        treasuryAssets:[{chainId:11155111,treasuryAddress,tokenAddress,balanceMicroUnits:0n,
+          blockNumber:100n,blockHash:"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          blockTimestamp:1_767_225_600n,source:"onchain"}],
+        verifyCanonicalBlock:async()=>undefined
+      })).rejects.toThrow("reconciliation_negative_senior_balance");
+      expect(db.clientQuery.mock.calls.some(([sql])=>String(sql).includes("INSERT INTO financial_reconciliation_snapshots")))
+        .toBe(false);
+    }
+  );
 });

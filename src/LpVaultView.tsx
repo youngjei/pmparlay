@@ -4,13 +4,11 @@ import {
   Blocks,
   CheckCircle2,
   CircleAlert,
-  Clock3,
   ExternalLink,
   Landmark,
   LockKeyhole,
   RefreshCw,
-  ShieldCheck,
-  Wallet
+  ShieldCheck
 } from "lucide-react";
 import {
   canShowLpVaultAmounts,
@@ -18,13 +16,17 @@ import {
   explorerBaseUrl,
   explorerUrl,
   fetchLpVault,
+  formatBasisPoints,
   formatDateTime,
+  formatMicroUsdc,
   formatRatio,
   formatReconciliationAge,
+  formatUtcCycleCutoff,
   formatUsd,
   gateCopy,
   getLpVaultDisplayState,
-  liquidityWindowCopy,
+  LP_VAULT_ACCOUNTING_CLIENT_MAX_AGE_MS,
+  LP_VAULT_CLIENT_MAX_AGE_MS,
   shortHash,
   unavailableCopy,
   type LpVaultFetcher,
@@ -45,6 +47,33 @@ type ViewState =
   | { kind: "loaded"; data: LpVaultResponse };
 
 const emptyValue = "--";
+
+export const LP_VAULT_SHADOW_COPY = {
+  title: "LEGWORK LP Vault",
+  promise: "Back LEGWORK tickets through a transparent, rolling economic NAV.",
+  banner: "Founder-funded Sepolia shadow · Deposits unavailable"
+} as const;
+
+export const LP_VAULT_FUTURE_LIFECYCLE = [
+  {
+    title: "Custody first, participation next",
+    detail: "A future deposit enters custody immediately but remains pending P&L until the next 00:00 UTC cycle, when shares mint at the canonical pre-deposit economic NAV price so entrants neither inherit prior P&L nor dilute active LPs."
+  },
+  {
+    title: "Fixed shares, floating value",
+    detail: "Activated shares are fixed and non-transferable. Their estimated USDC value moves with conservative unresolved-liability marks; only authoritative ticket settlements change finalized P&L."
+  },
+  {
+    title: "FIFO, liquidity-gated admission",
+    detail: "Withdrawal requests wait in immutable FIFO order and are admitted only when separately tracked redemption liquidity is available. Queued shares remain fully active."
+  },
+  {
+    title: "Active through 72-hour redemption",
+    detail: "Admitted shares continue to take dynamic P&L and back new exposure for 72 hours. At the end, the canonical economic-NAV price becomes binding for valuation and burn even if some underlying P&L remains estimated."
+  }
+] as const;
+
+export const LP_VAULT_LIQUIDITY_COPY = "Future economic NAV will measure the marked value represented by active shares. Redemption liquidity will be a separate reserved-capacity measure used only for FIFO admission; reserving liquidity will not be presented as profit or added to economic NAV.";
 
 function ExternalValue({ href, children }: { href?: string; children: React.ReactNode }) {
   if (!href) return <span>{children}</span>;
@@ -82,7 +111,7 @@ function LoadingView() {
   );
 }
 
-export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpVaultViewProps) {
+export function LpVaultView({ endpoint, fetcher }: LpVaultViewProps) {
   const [view, setView] = useState<ViewState>({ kind: "loading" });
   const [requestVersion, setRequestVersion] = useState(0);
   const [freshnessVersion, setFreshnessVersion] = useState(0);
@@ -113,8 +142,11 @@ export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpV
   }, [endpoint, fetcher, requestVersion]);
 
   useEffect(() => {
-    if (view.kind !== "loaded" || view.data.availability !== "available" || !view.data.snapshot) return;
-    const staleAt = Date.parse(view.data.snapshot.asOf) + 5 * 60_000;
+    if (view.kind !== "loaded" || view.data.availability !== "available" || !view.data.snapshot || !view.data.accounting) return;
+    const staleAt = Math.min(
+      Date.parse(view.data.snapshot.asOf) + LP_VAULT_CLIENT_MAX_AGE_MS,
+      Date.parse(view.data.accounting.asOf) + LP_VAULT_ACCOUNTING_CLIENT_MAX_AGE_MS
+    );
     const timeout = window.setTimeout(() => setFreshnessVersion((value) => value + 1), Math.max(0, staleAt - Date.now() + 1));
     return () => window.clearTimeout(timeout);
   }, [view]);
@@ -127,12 +159,16 @@ export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpV
     return (
       <section className="lp-vault" aria-label="LP Vault">
         <section className="lp-vault__hero lp-vault__unavailable" aria-live="polite">
-          <div className="lp-vault__eyebrow"><CircleAlert size={14} /> LP Vault shadow mode</div>
-          <h1>Vault status is unavailable</h1>
+          <div className="lp-vault__eyebrow"><CircleAlert size={14} /> LP Vault status</div>
+          <h1>{LP_VAULT_SHADOW_COPY.title}</h1>
+          <p className="lp-vault__promise">{LP_VAULT_SHADOW_COPY.promise}</p>
+          <div className="lp-vault__status-banner">
+            <LockKeyhole aria-hidden="true" size={18} />
+            <div><strong>{LP_VAULT_SHADOW_COPY.banner}</strong><span>No public LP funds or actions are enabled.</span></div>
+          </div>
           <p>{view.message} No capital amounts are shown without a verified reconciliation.</p>
           <div className="lp-vault__error-actions">
             <button className="lp-vault__connect" type="button" onClick={() => setRequestVersion((value) => value + 1)}><RefreshCw size={17} /> Retry</button>
-            {!authenticated && onConnect ? <button className="lp-vault__secondary-action" type="button" onClick={onConnect}><Wallet size={17} /> Connect wallet</button> : null}
           </div>
         </section>
       </section>
@@ -143,8 +179,8 @@ export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpV
   const state = getLpVaultDisplayState(data);
   const hasAmounts = canShowLpVaultAmounts(data);
   const snapshot = hasAmounts && data.snapshot ? data.snapshot : null;
+  const accounting = hasAmounts && data.accounting ? data.accounting : null;
   const unavailable = state === "ready" ? null : unavailableCopy(state);
-  const nextWindow = liquidityWindowCopy(data.epoch);
   const explorer = explorerBaseUrl(data.network.chainId);
   const tokenUrl = explorerUrl(explorer, `address/${data.vault?.tokenAddress ?? ""}`);
   const treasuryUrl = explorerUrl(explorer, `address/${data.vault?.treasuryAddress ?? ""}`);
@@ -160,42 +196,41 @@ export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpV
       <section className="lp-vault__hero">
         <div className="lp-vault__hero-head">
           <div>
-            <div className="lp-vault__eyebrow"><ShieldCheck size={14} /> LP Vault <span>Founder-funded Sepolia shadow</span></div>
-            <h1>House-book reserve monitor</h1>
-            <p>Reconciled test-USDC observation of LEGWORK's global house book. No segregated LP assets, deposits, or withdrawals are live.</p>
+            <div className="lp-vault__eyebrow"><ShieldCheck size={14} /> LP Vault</div>
+            <h1>{LP_VAULT_SHADOW_COPY.title}</h1>
+            <p className="lp-vault__promise">{LP_VAULT_SHADOW_COPY.promise}</p>
           </div>
           <div className="lp-vault__network"><Blocks size={15} /> {data.network.name} <span>Chain {data.network.chainId}</span></div>
         </div>
 
-        <div className="lp-vault__action-row">
-          <div className="lp-vault__action-state">
-            <LockKeyhole size={18} />
-            <div><strong>{unavailable?.title ?? "Community LP activity is not live"}</strong><span>{unavailable?.detail ?? "This founder-funded shadow monitor observes reserves without accepting LP capital."}</span><span>Shadow epoch status: {nextWindow.detail} This is not a deposit or withdrawal window.</span></div>
+        <div className="lp-vault__status-banner" role="status">
+          <LockKeyhole aria-hidden="true" size={18} />
+          <div>
+            <strong>{LP_VAULT_SHADOW_COPY.banner}</strong>
+            <span>This read-only view observes founder test capital. No public LP funds, balances, or actions exist yet.</span>
           </div>
-          {snapshot ? <button className="lp-vault__secondary-action" type="button" onClick={() => document.getElementById("capital-breakdown-title")?.scrollIntoView({ behavior: "smooth" })}><ShieldCheck size={17} /> View shadow reserves</button> : null}
         </div>
-        <p className="lp-vault__commitment"><Clock3 size={15} /> Policy under evaluation: future LP results would be pro rata and funded payouts FIFO. No LP payouts are live.</p>
 
         <div className="lp-vault__headline-grid">
           <div className="lp-vault__headline-metric">
-            <span>Observed house treasury</span>
+            <span>Verified assets</span>
             <strong>{snapshot ? formatUsd(snapshot.treasuryAssetsUsd) : emptyValue}</strong>
-            <small>Global house-book USDC, not segregated LP assets.</small>
+            <small>Reconciled test USDC in the observed treasury scope.</small>
           </div>
           <div className="lp-vault__headline-metric">
-            <span>Global live-ticket max payout</span>
+            <span>Maximum live-ticket payout</span>
             <strong>{snapshot ? formatUsd(snapshot.grossUnresolvedPayoutsUsd) : emptyValue}</strong>
-            <small>The black-swan payout if every open ticket wins.</small>
+            <small>Full offered payouts reserved with no diversification credit.</small>
           </div>
           <div className="lp-vault__headline-metric">
-            <span>Observed house-book coverage</span>
+            <span>Payout coverage</span>
             <strong>{payoutCoverageDisplay}</strong>
-            <small>{collateralHealth?.label ?? "Coverage unavailable"}. {collateralHealth?.detail ?? "Waiting for verified reserves."}</small>
+            <small>Assets after senior obligations divided by unresolved payouts.</small>
           </div>
           <div className="lp-vault__headline-metric">
-            <span>Modeled capital surplus <em>(not withdrawable)</em></span>
-            <strong>{snapshot ? formatUsd(snapshot.capitalAboveWithdrawalFloorUsd) : emptyValue}</strong>
-            <small>Modeled above the 125% floor. No LP withdrawal balance or NAV exists.</small>
+            <span>Collateral state</span>
+            <strong className="lp-vault__headline-status">{collateralHealth?.label ?? "Unavailable"}</strong>
+            <small>{collateralHealth?.detail ?? "Waiting for verified reserve evidence."}</small>
           </div>
         </div>
       </section>
@@ -212,60 +247,93 @@ export function LpVaultView({ authenticated, onConnect, endpoint, fetcher }: LpV
       ) : (
         <section className="lp-vault__transparency" aria-labelledby="capital-breakdown-title">
           <div className="lp-vault__section-heading">
-            <div><span className="lp-vault__eyebrow"><Landmark size={14} /> Transparency dashboard</span><h2 id="capital-breakdown-title">Shadow reserve breakdown</h2></div>
-            <span className="lp-vault__reconciled"><CheckCircle2 size={16} /> Last reconciled {formatReconciliationAge(snapshot.asOf)}</span>
+            <div><span className="lp-vault__eyebrow"><Landmark size={14} /> Fresh reconciliation</span><h2 id="capital-breakdown-title">Verified reserve state</h2></div>
+            <div className="lp-vault__freshness" aria-label="Vault data freshness">
+              <span className="lp-vault__reconciled"><CheckCircle2 size={16} /> Reserve current · {formatReconciliationAge(snapshot.asOf)}</span>
+              <span className="lp-vault__reconciled"><CheckCircle2 size={16} /> Accounting current · {formatReconciliationAge(accounting!.asOf)}</span>
+            </div>
           </div>
-          <p className="lp-vault__scope-note">These are global treasury observations, not LP assets, NAV, or withdrawable balances. LP ownership and returns are not attributed, and the shadow limit does not control customer quotes.</p>
-
-          {collateralHealth ? <div className={`lp-vault__health lp-vault__health--${collateralHealth.tone}`}><ShieldCheck size={19} /><div><strong>{collateralHealth.label}</strong><span>{collateralHealth.detail}</span></div></div> : null}
+          <p className="lp-vault__scope-note">The reserve view uses current reconciliation evidence. Rolling accounting uses its own canonical daily checkpoint and block evidence. This shadow policy does not authorize customer quotes or transfers.</p>
 
           {snapshot.custodyDeltaUsd !== 0 ? <div className="lp-vault__delta-warning"><AlertTriangle size={19} /><div><strong>Custody delta detected: {formatUsd(snapshot.custodyDeltaUsd)}</strong><span>Reported treasury assets differ from the reconciliation expectation.</span></div></div> : null}
 
+          <section className="lp-vault__accounting" aria-labelledby="rolling-accounting-title">
+            <div className="lp-vault__accounting-head">
+              <div><span className="lp-vault__eyebrow">Rolling accounting</span><h2 id="rolling-accounting-title">Canonical economic value</h2></div>
+              <span>Cycle cutoff {formatUtcCycleCutoff(accounting!.cycleCutoffAt)}</span>
+            </div>
+            <div className="lp-vault__accounting-grid">
+              <div><span>Economic NAV</span><strong>{formatMicroUsdc(accounting!.economicNavMicroUnits)}</strong><small>Value attributable to active shares after conservative liability marks.</small></div>
+              <div><span>Share price</span><strong>{formatMicroUsdc(accounting!.sharePriceMicroUnits)}</strong><small>USDC value per whole non-transferable share.</small></div>
+              <div><span>Pending activation</span><strong>{formatMicroUsdc(accounting!.pendingActivationMicroUnits)}</strong><small>Excluded from P&amp;L until the next 00:00 UTC cycle.</small></div>
+              <div><span>Estimated P&amp;L</span><strong className="lp-vault__estimated">{formatMicroUsdc(accounting!.estimatedPnlMicroUnits, { signed: true })}</strong><small>Includes unresolved market liability marks.</small></div>
+              <div><span>Finalized P&amp;L</span><strong>{formatMicroUsdc(accounting!.finalizedPnlMicroUnits, { signed: true })}</strong><small>Recognized only from authoritative ticket settlements.</small></div>
+              <div><span>Unresolved liability mark</span><strong>{formatMicroUsdc(accounting!.markedUnresolvedLiabilityMicroUnits)}</strong><small>{formatBasisPoints(accounting!.liabilityMarkCoverageBps)} mark evidence coverage · {formatMicroUsdc(accounting!.fullLiabilityFallbackMicroUnits)} at full-liability fallback.</small></div>
+            </div>
+          </section>
+
           <div className="lp-vault__capital-grid">
             <div><span>Senior user obligations</span><strong>{formatUsd(snapshot.seniorUserObligationsUsd)}</strong></div>
-            <div><span>Reserved net exposure</span><strong>{formatUsd(snapshot.reservedNetLiabilityUsd)}</strong></div>
+            <div><span>Net liability reserve</span><strong>{formatUsd(snapshot.reservedNetLiabilityUsd)}</strong></div>
             <div><span>Minimum collateral required</span><strong>{formatUsd(snapshot.hardSolvencyFloorUsd)}</strong></div>
             <div><span>25% coverage buffer</span><strong>{formatUsd(snapshot.operatingCoverageBufferUsd)}</strong></div>
-            <div><span>Pending basket capacity</span><strong>{formatUsd(snapshot.pendingBasketCapacityChargeUsd)}</strong><small>{formatUsd(snapshot.pendingBasketMaxPayoutUsd)} maximum payout against {formatUsd(snapshot.pendingBasketStakeUsd)} expected stake.</small></div>
-            <div><span>Modeled minimum after future LP withdrawals</span><strong>{formatUsd(snapshot.operatingWithdrawalFloorUsd)}</strong></div>
-            <div className="lp-vault__hard-capital"><span>Capital after all current payouts</span><strong>{formatUsd(snapshot.hardCapitalUsd)}</strong></div>
+            <div><span>Pending checkout capacity</span><strong>{formatUsd(snapshot.pendingBasketCapacityChargeUsd)}</strong><small>{formatUsd(snapshot.pendingBasketMaxPayoutUsd)} maximum payout against {formatUsd(snapshot.pendingBasketStakeUsd)} expected stake.</small></div>
+            <div><span>Shadow operating reserve floor</span><strong>{formatUsd(snapshot.operatingWithdrawalFloorUsd)}</strong></div>
+            <div><span>Capital after all current payouts</span><strong>{formatUsd(snapshot.hardCapitalUsd)}</strong></div>
+            <div className="lp-vault__hard-capital"><span>Capacity above reserve floor</span><strong>{formatUsd(snapshot.capitalAboveWithdrawalFloorUsd)}</strong><small>Shadow capacity only. It is not NAV, redemption liquidity, or a withdrawable balance.</small></div>
           </div>
 
-          <div className="lp-vault__reserve-policy">
-            <ShieldCheck size={19} />
-            <div>
-              <strong>Modeled future LP withdrawal policy</strong>
-              <span>If community LP withdrawals launch, user balances and ticket payouts would come first. LP payouts would begin only after final settlement and would have to preserve reserves. Under the proposed policy, a shortfall would pause processing for investigation.</span>
+          <section className="lp-vault__lifecycle" aria-labelledby="lp-vault-lifecycle-title">
+            <div className="lp-vault__section-heading">
+              <div><span className="lp-vault__eyebrow">Future lifecycle</span><h2 id="lp-vault-lifecycle-title">How rolling participation will work</h2></div>
             </div>
-          </div>
+            <p className="lp-vault__scope-note">This approved model is not live. It describes the accounting and redemption behavior required before public participation can open.</p>
+            <ol className="lp-vault__lifecycle-grid">
+              {LP_VAULT_FUTURE_LIFECYCLE.map((item) => (
+                <li key={item.title}>
+                  <strong>{item.title}</strong>
+                  <span>{item.detail}</span>
+                </li>
+              ))}
+            </ol>
+            <div className="lp-vault__liquidity-note">
+              <ShieldCheck aria-hidden="true" size={19} />
+              <div><strong>Value and liquidity stay separate</strong><span>{LP_VAULT_LIQUIDITY_COPY}</span></div>
+            </div>
+          </section>
 
-          <div className="lp-vault__evidence-grid">
-            <div className="lp-vault__evidence">
-              <span>Source network</span>
-              <strong>{data.network.name} <small>Chain {data.network.chainId}</small></strong>
-              <div className="lp-vault__links">
-                {data.vault?.tokenAddress ? <ExternalValue href={tokenUrl}>USDC token</ExternalValue> : null}
-                {data.vault?.treasuryAddress ? <ExternalValue href={treasuryUrl}>Treasury</ExternalValue> : null}
+          <details className="lp-vault__technical">
+            <summary><span><CheckCircle2 aria-hidden="true" size={16} /> Technical evidence and operating gates</span><small>Addresses, block, time, and control state</small></summary>
+            <div className="lp-vault__technical-body">
+              <div className="lp-vault__evidence-grid">
+                <div className="lp-vault__evidence">
+                  <span>Source network</span>
+                  <strong>{data.network.name} <small>Chain {data.network.chainId}</small></strong>
+                  <div className="lp-vault__links">
+                    {data.vault?.tokenAddress ? <ExternalValue href={tokenUrl}>USDC token</ExternalValue> : null}
+                    {data.vault?.treasuryAddress ? <ExternalValue href={treasuryUrl}>Treasury</ExternalValue> : null}
+                  </div>
+                </div>
+                <div className="lp-vault__evidence">
+                  <span>Canonical block</span>
+                  <strong><ExternalValue href={blockUrl}>#{snapshot.blockNumber}</ExternalValue></strong>
+                  <div className="lp-vault__hash"><ExternalValue href={blockUrl}>{shortHash(snapshot.blockHash)}</ExternalValue></div>
+                </div>
+                <div className="lp-vault__evidence">
+                  <span>Source observed</span>
+                  <strong>{formatDateTime(snapshot.asOf)}</strong>
+                  <div className="lp-vault__age">Processed {formatReconciliationAge(snapshot.processedAt)} · Accounting {formatReconciliationAge(accounting!.asOf)} · Book {accounting!.bookVersion}</div>
+                  <div className="lp-vault__links"><ExternalValue href={snapshotUrl}>View latest vault state JSON</ExternalValue></div>
+                </div>
+              </div>
+
+              <div className="lp-vault__gates">
+                <Gate label="Observed underwriting gate (shadow only)" value={snapshot.gate.underwriting} />
+                <Gate label="Senior user operations" value={snapshot.gate.seniorOperations} />
+                <Gate label="Public LP withdrawals" value={snapshot.gate.lpWithdrawals} />
               </div>
             </div>
-            <div className="lp-vault__evidence">
-              <span>Canonical block</span>
-              <strong><ExternalValue href={blockUrl}>#{snapshot.blockNumber}</ExternalValue></strong>
-              <div className="lp-vault__hash"><ExternalValue href={blockUrl}>{shortHash(snapshot.blockHash)}</ExternalValue></div>
-            </div>
-            <div className="lp-vault__evidence">
-              <span>Last reconciled</span>
-              <strong>{formatDateTime(snapshot.asOf)}</strong>
-              <div className="lp-vault__age">Reconciliation age: {formatReconciliationAge(snapshot.asOf)}</div>
-              <div className="lp-vault__links"><ExternalValue href={snapshotUrl}>View latest vault state JSON</ExternalValue></div>
-            </div>
-          </div>
-
-          <div className="lp-vault__gates">
-            <Gate label="Observed underwriting gate (shadow only)" value={snapshot.gate.underwriting} />
-            <Gate label="Senior user operations" value={snapshot.gate.seniorOperations} />
-            <Gate label="LP withdrawals" value={snapshot.gate.lpWithdrawals} />
-          </div>
+          </details>
         </section>
       )}
     </section>

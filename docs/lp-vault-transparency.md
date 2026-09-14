@@ -1,15 +1,17 @@
 # LEGWORK LP Vault Transparency Standard
 
 Status: Canonical publishing source
-Last updated: 2026-09-04
+Last updated: 2026-09-12
 
 This document defines what LEGWORK must disclose about the LP Vault, how each figure is calculated, and when the product must withhold a value. It is the source for future public documentation and LP Vault interface copy. It is not an offer to accept community capital.
 
 ## Current Stage
 
-The current LP Vault is a founder-funded Sepolia shadow model using test USDC. It observes the existing LEGWORK house book through a logical accounting scope in the staging treasury. It does not accept community deposits, mint LP units, execute LP withdrawals, calculate LP NAV, or advertise returns.
+The current `LEGWORK LP Vault` is a founder-funded Sepolia shadow model using test USDC. Its product promise is: `Back LEGWORK tickets through a transparent, rolling economic NAV.` The page must pair that promise with one clear notice: `Founder-funded Sepolia shadow · Deposits unavailable`.
 
-The page may show shadow capital facts only when they come from the latest trusted worker reconciliation, match the configured chain, treasury, token, block number, and block hash, and are no more than five minutes old. Otherwise every financial amount is withheld as unavailable. A fresh reconciliation with a blocked operating gate remains visible with its warning; bad news must not disappear from the transparency record.
+The shadow view observes the existing LEGWORK house book through a logical accounting scope in the staging treasury. It publishes verified aggregate economic NAV, share price, pending activation, estimated and finalized P&L, and unresolved-liability mark coverage. It does not accept community deposits, mint public LP shares, execute LP withdrawals, show personal balances, or advertise returns or APY.
+
+The page may show shadow capital facts only when both evidence clocks pass independently. Reserve admission requires a confirmation-safe canonical block that matches the configured chain, treasury, and token, and whose source-evidence timestamp (`asOf`) is no more than five minutes old. `asOf` is the timestamp of the observed source block, not the later time at which the worker completed processing it (`processedAt`). The latest daily rolling-accounting checkpoint must be no more than 26 hours old, carry its own reconciliation and canonical-block evidence, and pass replay and arithmetic validation. The two records are not required to share a block because one is continuous reserve evidence and the other is a daily accounting close. Otherwise every financial amount is withheld as unavailable. A fresh reconciliation with a blocked operating gate remains visible with its warning; bad news must not disappear from the transparency record.
 
 ## Capital Definitions
 
@@ -23,8 +25,8 @@ All canonical calculations use integer micro-USDC. Decimal dollar values are dis
 - `Capital above solvency floor`: reconciled assets minus the hard solvency floor. A negative value blocks financial operations.
 - `25% coverage buffer`: gross unresolved payouts multiplied by 25%, rounded up to the next micro-USDC.
 - `Pending basket capacity`: the additional house capital and 25% buffer reserved for payment intents awaiting payment or activation. For each pending intent with maximum payout `P` and expected stake `S`, the charge is `max(ceil(125% * P) - S, 0)`. Each intent is rounded independently before the charges are summed.
-- `Withdrawal protection floor`: hard solvency floor plus the 25% live-ticket coverage buffer and pending basket capacity.
-- `Capital above withdrawal floor`: the greater of zero and reconciled assets minus the withdrawal protection floor. In shadow mode this is an observable capacity figure, not LP NAV or a promise that it can be withdrawn.
+- `Shadow operating reserve floor`: hard solvency floor plus the 25% live-ticket coverage buffer and pending basket capacity. The current API field retains the implementation name `operatingWithdrawalFloorUsd`, but the public shadow label must not imply that LP withdrawals are live.
+- `Capacity above reserve floor`: the greater of zero and reconciled assets minus the shadow operating reserve floor. In shadow mode this is an observable underwriting-capacity figure, not LP NAV, redemption liquidity, or a promise that it can be withdrawn.
 - `Gross coverage ratio`: reconciled assets after senior user obligations, divided by gross unresolved payouts. It is unavailable when there are no unresolved payouts.
 - `Custody delta`: reconciled treasury assets minus the internal custody ledger. Any unexplained difference is shown and restricts or blocks operations according to the financial gate.
 
@@ -45,26 +47,36 @@ treasury assets after the action
 
 The future execution check must include pending ticket payment reservations and run against one locked canonical book version. The current shadow stage publishes this calculation but does not authorize customer quotes or LP transfers from it. A displayed surplus is never sufficient authorization to transfer funds.
 
-## Approved Future Epoch And Withdrawal Policy
+## Rolling Accounting And Future Withdrawal Policy
 
-The following policy is approved but not implemented in the founder shadow stage. There are no community LP units, redemption requests, payables, or transfers yet.
+The deterministic rolling accounting foundation is implemented for founder shadow verification. Community deposits, wallet-owned LP shares, redemption requests, payables, and transfers are not live.
 
-The pilot uses one fixed, non-overlapping cohort at a time. Capital enters during a 72-hour funding window and may underwrite markets with no more than 30 days to maturity. No LP units are minted after underwriting begins.
+### Deposit And Share Accounting
 
-Once community participation is implemented, an LP may submit an idempotent withdrawal request while an epoch is active. The request will record priority only: it will not burn units, create a payable liability, or permit capital to escape unresolved results. The request will become eligible only after the epoch is final, all attributed tickets and payment reservations are final, custody reconciles, and no relevant incident is open.
+A confirmed eligible deposit enters dedicated custody immediately. Custody does not imply immediate participation: the amount remains in a pending-deposit account and takes no vault P&L until the next canonical daily cycle at 00:00 UTC. At that cycle, after exact reconciliation, the deposit receives fixed non-transferable shares using the canonical pre-deposit economic-NAV share price. Economic NAV includes conservative current liability marks for unresolved tickets. Using the price before adding the deposit prevents the entrant from inheriting pre-entry P&L and prevents dilution of incumbent shares. Share quantity does not rebase or transfer between wallets. The USDC value represented by each share floats with economic NAV.
 
-At epoch close, final economics and requested redemption entitlements will be calculated pro rata across participation units with deterministic largest-remainder rounding. All approved payables will be created simultaneously, then sent FIFO by immutable sequence. Smallest-first is prohibited because an LP could split one redemption into many small requests to buy priority. Every transfer will recheck the operating floor under a database lock. If all approved post-settlement payables cannot be funded, the queue will pause for custody, reconciliation, or solvency incident response; LEGWORK will not silently change economic entitlements through payment order.
+Economic NAV and share value combine settlement-finalized P&L with conservative current marks for unresolved liabilities. A displayed share value that can still change with unresolved marks must be labeled `Estimated`, with the mark method and timestamp disclosed. Only authoritative ticket settlements change `Finalized P&L`. A 00:00 UTC cycle creates a canonical price for deposit accounting, but that event does not make unresolved P&L or the whole share value finalized. Estimated P&L cannot establish a guaranteed return.
 
-A disputed market can keep an epoch in runoff without a promised unlock date. LEGWORK follows the authoritative source result and does not invent a settlement to release LP funds.
+### FIFO Admission And 72-Hour Redemption
+
+An LP submits an idempotent withdrawal request for a fixed share amount. The request receives an immutable FIFO sequence but does not reserve liquidity, freeze its USDC value, burn shares, or remove the LP from P&L. Queued shares remain active and continue to back new tickets.
+
+The oldest queued request is considered only when the frequent reconciliation worker creates a new canonical custody snapshot under the exclusive financial lock. The latest daily checkpoint supplies the share price; the new reconciliation supplies current assets, obligations, live-ticket exposure, pending-basket capacity, and breaker state. Admission records both sources and proceeds only when sufficient redemption liquidity can be reserved separately while preserving senior user obligations and the 125% operating floor. A later smaller request cannot bypass an earlier larger request. If the head request cannot be admitted, it remains waiting without changing priority.
+
+Admission starts a 72-hour redemption period. Throughout the period, the requested shares remain active: they participate in dynamic estimated marked P&L, settlement-finalized P&L, and new exposure accepted by the rolling vault. There is no value snapshot at request or admission. At the end of 72 hours, the system locks the latest eligible reconciled canonical economic-NAV share price and makes it binding for that redemption. It determines the USDC amount with deterministic micro-USDC rounding, burns the requested shares, and creates the payable atomically. Binding the price for the burn does not imply that unresolved-ticket P&L inside economic NAV is finalized. Payment rechecks custody and the operating floor under a database lock. A failed check pauses payment for incident response without restoring an earlier price or silently changing FIFO priority.
+
+### Value Versus Liquidity
+
+`Economic NAV` is the canonical marked economic value attributable to all active shares. It combines settlement-finalized P&L with conservative liability marks for unresolved tickets, so it is not described as wholly finalized while those tickets exist. `Share price` is economic NAV divided by active shares using the approved deterministic rounding rule. A price may be canonical and binding for a specific mint or burn even though unresolved P&L within it remains estimated. `Reserved redemption liquidity` is cash capacity set aside after FIFO admission to support redemptions. These are separate ledger measures: reserving liquidity changes deployable capacity, but it is not profit, is not added to economic NAV, and does not by itself fix the redemption amount before the 72-hour period ends.
 
 ## Public Evidence
 
 Every available financial snapshot must publish:
 
 - network, chain ID, currency, token address, and treasury address;
-- reconciliation timestamp and maximum freshness policy;
+- source-evidence `asOf` and worker `processedAt`; enforce the five-minute reserve and 26-hour accounting freshness limits defined above;
 - canonical block number and block hash;
-- the capital definitions above;
+- the current shadow capital definitions above;
 - custody delta and financial gate state;
 - accounting scope, including whether values are global house-book observations or vault-attributed records.
 
@@ -75,17 +87,20 @@ Treasury, token, and block values link to the appropriate block explorer. Histor
 The following sections appear only after canonical systems exist behind them:
 
 - Community deposit action: legal eligibility, dedicated custody, transfer ownership, deposit confirmation, and unit minting must all be live.
-- LP position: canonical units, epoch attribution, contributed capital, realized P&L, and redemption status must be replayable from append-only records.
-- Performance: only finalized epoch returns and losses may be shown. No projected APY, expected spread revenue, or smooth interim NAV.
+- LP position: canonical fixed shares, activation cycle, contributed capital, economic-NAV/share-price timestamp, estimated marked P&L, finalized settlement P&L, and redemption status must be replayable from append-only records.
+- Performance: estimated P&L must be visibly distinct from settlement-finalized P&L. A daily cycle creates a canonical accounting checkpoint; it does not finalize unresolved outcomes. No projected APY, expected spread revenue, or smoothed value.
 - Portfolio risk: exact-basket concentration, event and factor exposure, maturity, settlement authority, scenario loss, reserve utilization, and policy hash.
-- Withdrawal queue: aggregate eligible amount, queue depth, oldest eligible request age, fulfilled amount, and current executable capacity. Wallet-level details are shown only to the authenticated owner.
+- Withdrawal queue: aggregate requested shares, queue depth, oldest request age, admitted amount, reserved redemption liquidity, redemption periods ending, and fulfilled amount. Wallet-level details are shown only to the authenticated owner.
 - Governance: Safe owners and threshold, current policy hash, breaker state, approved changes, and independent audit reports when available.
 
 ## Publishing Rules
 
 - Use `Unavailable`, never `$0`, when a required source is absent, stale, malformed, untrusted, or scoped incorrectly.
 - Separate testnet, founder shadow, founder mainnet, and community-capital states visibly.
-- Do not call capital above a reserve floor `NAV`, `available balance`, or `guaranteed liquidity`.
+- Do not call capital above a reserve floor `NAV`, `available balance`, `reserved redemption liquidity`, or `guaranteed liquidity`.
+- When community accounting exists, label P&L from unresolved marks `Estimated` and P&L from authoritative settlements `Finalized`; publish the applicable cycle, mark method, and timestamp.
+- Do not label economic NAV or share price `Finalized` merely because a daily cycle closed. Use `Canonical` or `Binding for this mint/burn` when those statements are true, while preserving the estimated label for unresolved P&L.
+- Publish economic NAV and reserved redemption liquidity as separate figures with separate formulas; never sum them or use one as a synonym for the other.
 - Do not describe the vault as insured, risk-free, autonomous, AI-managed, or permissionless.
 - Explain losses, delays, disputes, gate restrictions, and custody differences with the same prominence as positive performance.
 - Keep calculations reproducible from published definitions and source-linked evidence.

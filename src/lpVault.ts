@@ -1,4 +1,7 @@
 export const LP_VAULT_CLIENT_MAX_AGE_MS = 5 * 60_000;
+export const LP_VAULT_ACCOUNTING_CLIENT_MAX_AGE_MS = 26 * 60 * 60_000;
+export const LP_VAULT_SHARE_UNITS_PER_SHARE = "1000000000000000000";
+export const LP_VAULT_GENESIS_SHARE_PRICE_MICRO_UNITS = "1000000";
 
 export type LpVaultAvailability =
   | "available"
@@ -10,9 +13,32 @@ export type LpVaultAvailability =
   | "reconciliation_untrusted"
   | "reconciliation_wrong_scope"
   | "reconciliation_future"
-  | "reconciliation_stale";
+  | "reconciliation_stale"
+  | "accounting_absent"
+  | "accounting_malformed"
+  | "accounting_stale"
+  | "accounting_mismatch";
 
-export type LpVaultEpochStatus = "planned" | "active" | "runoff" | "finalized" | "canceled";
+export type LpVaultAccounting = {
+  scope: "rolling_lp_shadow";
+  asOf: string;
+  processedAt: string;
+  cycleCutoffAt: string;
+  reconciliationId: string;
+  bookVersion: string;
+  canonicalBlockNumber: string;
+  canonicalBlockHash: string;
+  economicNavMicroUnits: string;
+  sharePriceMicroUnits: string;
+  shareUnitsPerShare: typeof LP_VAULT_SHARE_UNITS_PER_SHARE;
+  activeShareUnits: string;
+  pendingActivationMicroUnits: string;
+  estimatedPnlMicroUnits: string;
+  finalizedPnlMicroUnits: string;
+  markedUnresolvedLiabilityMicroUnits: string;
+  fullLiabilityFallbackMicroUnits: string;
+  liabilityMarkCoverageBps: number;
+};
 
 export type LpVaultResponse = {
   mode: "shadow";
@@ -33,16 +59,12 @@ export type LpVaultResponse = {
     treasuryAddress: string;
     tokenAddress: string;
   };
-  epoch: null | {
-    id: string;
-    number: number;
-    status: LpVaultEpochStatus;
-    startsAt: string;
-    finalizedAt?: string;
-  };
+  accounting: LpVaultAccounting | null;
   snapshot: null | {
     accountingScope: "global_house_book_not_lp_attributed";
+    reconciliationId: string;
     asOf: string;
+    processedAt: string;
     blockNumber: string;
     blockHash: string;
     treasuryAssetsUsd: number;
@@ -97,11 +119,17 @@ const availabilityValues = new Set<LpVaultAvailability>([
   "reconciliation_untrusted",
   "reconciliation_wrong_scope",
   "reconciliation_future",
-  "reconciliation_stale"
+  "reconciliation_stale",
+  "accounting_absent",
+  "accounting_malformed",
+  "accounting_stale",
+  "accounting_mismatch"
 ]);
-const epochStatuses = new Set<LpVaultEpochStatus>(["planned", "active", "runoff", "finalized", "canceled"]);
 const addressPattern = /^0x[0-9a-fA-F]{40}$/;
 const blockHashPattern = /^0x[0-9a-fA-F]{64}$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const unsignedIntegerPattern = /^(0|[1-9][0-9]*)$/;
+const signedIntegerPattern = /^(0|-?[1-9][0-9]*)$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -137,23 +165,73 @@ function isVault(value: unknown): value is NonNullable<LpVaultResponse["vault"]>
   );
 }
 
-function isEpoch(value: unknown): value is NonNullable<LpVaultResponse["epoch"]> {
+function isAccounting(value: unknown): value is LpVaultAccounting {
   if (!isRecord(value)) return false;
-  return (
-    typeof value.id === "string" &&
-    Number.isInteger(value.number) &&
-    Number(value.number) > 0 &&
-    epochStatuses.has(value.status as LpVaultEpochStatus) &&
-    isIsoDate(value.startsAt) &&
-    (value.finalizedAt === undefined || isIsoDate(value.finalizedAt))
-  );
+  if (
+    value.scope !== "rolling_lp_shadow" ||
+    !isIsoDate(value.asOf) ||
+    !isIsoDate(value.processedAt) ||
+    Date.parse(value.processedAt) < Date.parse(value.asOf) ||
+    !isIsoDate(value.cycleCutoffAt) ||
+    typeof value.reconciliationId !== "string" ||
+    !uuidPattern.test(value.reconciliationId) ||
+    typeof value.bookVersion !== "string" ||
+    !unsignedIntegerPattern.test(value.bookVersion) ||
+    typeof value.canonicalBlockNumber !== "string" ||
+    !unsignedIntegerPattern.test(value.canonicalBlockNumber) ||
+    typeof value.canonicalBlockHash !== "string" ||
+    !blockHashPattern.test(value.canonicalBlockHash) ||
+    typeof value.economicNavMicroUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.economicNavMicroUnits) ||
+    typeof value.sharePriceMicroUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.sharePriceMicroUnits) ||
+    value.shareUnitsPerShare !== LP_VAULT_SHARE_UNITS_PER_SHARE ||
+    typeof value.activeShareUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.activeShareUnits) ||
+    typeof value.pendingActivationMicroUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.pendingActivationMicroUnits) ||
+    typeof value.estimatedPnlMicroUnits !== "string" ||
+    !signedIntegerPattern.test(value.estimatedPnlMicroUnits) ||
+    typeof value.finalizedPnlMicroUnits !== "string" ||
+    !signedIntegerPattern.test(value.finalizedPnlMicroUnits) ||
+    typeof value.markedUnresolvedLiabilityMicroUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.markedUnresolvedLiabilityMicroUnits) ||
+    typeof value.fullLiabilityFallbackMicroUnits !== "string" ||
+    !unsignedIntegerPattern.test(value.fullLiabilityFallbackMicroUnits) ||
+    !Number.isInteger(value.liabilityMarkCoverageBps) ||
+    Number(value.liabilityMarkCoverageBps) < 0 ||
+    Number(value.liabilityMarkCoverageBps) > 10_000
+  ) return false;
+
+  const cutoff = new Date(value.cycleCutoffAt);
+  if (
+    cutoff.getUTCHours() !== 0 ||
+    cutoff.getUTCMinutes() !== 0 ||
+    cutoff.getUTCSeconds() !== 0 ||
+    cutoff.getUTCMilliseconds() !== 0 ||
+    Date.parse(value.asOf) < cutoff.getTime()
+  ) return false;
+
+  const economicNav = BigInt(value.economicNavMicroUnits);
+  const activeShares = BigInt(value.activeShareUnits);
+  const sharePrice = BigInt(value.sharePriceMicroUnits);
+  const expectedSharePrice = activeShares === 0n
+    ? BigInt(LP_VAULT_GENESIS_SHARE_PRICE_MICRO_UNITS)
+    : (economicNav * BigInt(LP_VAULT_SHARE_UNITS_PER_SHARE)) / activeShares;
+  if (sharePrice !== expectedSharePrice || (activeShares === 0n && economicNav !== 0n)) return false;
+
+  return BigInt(value.fullLiabilityFallbackMicroUnits) <= BigInt(value.markedUnresolvedLiabilityMicroUnits);
 }
 
 function isSnapshot(value: unknown): value is NonNullable<LpVaultResponse["snapshot"]> {
   if (!isRecord(value) || !isRecord(value.gate)) return false;
   const structurallyValid = (
     value.accountingScope === "global_house_book_not_lp_attributed" &&
+    typeof value.reconciliationId === "string" &&
+    uuidPattern.test(value.reconciliationId) &&
     isIsoDate(value.asOf) &&
+    isIsoDate(value.processedAt) &&
+    Date.parse(value.processedAt) >= Date.parse(value.asOf) &&
     typeof value.blockNumber === "string" &&
     /^(0|[1-9][0-9]*)$/.test(value.blockNumber) &&
     typeof value.blockHash === "string" &&
@@ -257,10 +335,13 @@ function isLpVaultResponse(value: unknown): value is LpVaultResponse {
     value.network.currency !== "USDC"
   ) return false;
   if (value.vault !== null && !isVault(value.vault)) return false;
-  if (value.epoch !== null && !isEpoch(value.epoch)) return false;
+  if (value.accounting !== null && !isAccounting(value.accounting)) return false;
   if (value.snapshot !== null && !isSnapshot(value.snapshot)) return false;
-  if (value.availability === "available" && (!value.vault || !value.snapshot)) return false;
-  if (value.availability !== "available" && value.snapshot !== null) return false;
+  if (value.availability === "available") {
+    if (!value.vault || !value.snapshot || !value.accounting) return false;
+  } else if (value.snapshot !== null || value.accounting !== null) {
+    return false;
+  }
   return true;
 }
 
@@ -327,10 +408,13 @@ export function collateralHealthCopy(snapshot: NonNullable<LpVaultResponse["snap
 
 export function getLpVaultDisplayState(data: LpVaultResponse, now = Date.now()): LpVaultDisplayState {
   if (data.availability !== "available") return data.availability;
-  if (!data.snapshot || !data.vault) return "reconciliation_malformed";
-  const ageMs = now - Date.parse(data.snapshot.asOf);
-  if (!Number.isFinite(ageMs) || ageMs < 0) return "reconciliation_future";
-  if (ageMs > LP_VAULT_CLIENT_MAX_AGE_MS) return "reconciliation_stale";
+  if (!data.snapshot || !data.vault || !data.accounting) return "reconciliation_malformed";
+  const reconciliationAge = now - Date.parse(data.snapshot.asOf);
+  const accountingAge = now - Date.parse(data.accounting.asOf);
+  if (!Number.isFinite(reconciliationAge) || reconciliationAge < 0) return "reconciliation_future";
+  if (!Number.isFinite(accountingAge) || accountingAge < 0) return "accounting_malformed";
+  if (reconciliationAge > LP_VAULT_CLIENT_MAX_AGE_MS) return "reconciliation_stale";
+  if (accountingAge > LP_VAULT_ACCOUNTING_CLIENT_MAX_AGE_MS) return "accounting_stale";
   return "ready";
 }
 
@@ -340,12 +424,32 @@ export function canShowLpVaultAmounts(data: LpVaultResponse, now = Date.now()): 
 
 export function formatUsd(value: number): string {
   if (!Number.isFinite(value)) return "Unavailable";
+  const showMicroUnits = value !== 0 && Math.abs(value) < 0.01;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 2,
-    maximumFractionDigits: 2
+    maximumFractionDigits: showMicroUnits ? 6 : 2
   }).format(value);
+}
+
+export function formatMicroUsdc(value: string, options: { signed?: boolean } = {}): string {
+  if (!signedIntegerPattern.test(value)) return "Unavailable";
+  const amount = BigInt(value);
+  const absolute = amount < 0n ? -amount : amount;
+  const whole = absolute / 1_000_000n;
+  const rawFraction = (absolute % 1_000_000n).toString().padStart(6, "0");
+  const fraction = rawFraction.replace(/0+$/, "").padEnd(2, "0");
+  const formatted = `$${new Intl.NumberFormat("en-US").format(whole)}.${fraction}`;
+  if (amount < 0n) return `-${formatted}`;
+  return options.signed && amount > 0n ? `+${formatted}` : formatted;
+}
+
+export function formatBasisPoints(value: number): string {
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) return "Unavailable";
+  const whole = Math.floor(value / 100);
+  const fraction = value % 100;
+  return fraction === 0 ? `${whole}%` : `${whole}.${fraction.toString().padStart(2, "0").replace(/0$/, "")}%`;
 }
 
 export function formatRatio(value: number | null): string {
@@ -365,6 +469,17 @@ export function formatDateTime(value?: string): string {
     minute: "2-digit",
     timeZoneName: "short"
   }).format(date);
+}
+
+export function formatUtcCycleCutoff(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unavailable";
+  return `${new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(date)} · 00:00 UTC`;
 }
 
 export function formatReconciliationAge(asOf: string, now = Date.now()): string {
@@ -414,23 +529,6 @@ export function gateCopy(
   }
 }
 
-export function liquidityWindowCopy(epoch: LpVaultResponse["epoch"]): { value: string; detail: string } {
-  if (!epoch) return { value: "Not scheduled", detail: "No shadow epoch is active." };
-  if (epoch.status === "planned") {
-    return { value: formatDateTime(epoch.startsAt), detail: `Epoch ${epoch.number} is planned.` };
-  }
-  if (epoch.status === "active") {
-    return { value: "After full run-off", detail: `Epoch ${epoch.number} is underwriting.` };
-  }
-  if (epoch.status === "runoff") {
-    return { value: "After final settlement", detail: `Epoch ${epoch.number} is resolving open positions.` };
-  }
-  if (epoch.status === "finalized") {
-    return { value: formatDateTime(epoch.finalizedAt), detail: `Epoch ${epoch.number} is finalized.` };
-  }
-  return { value: "Not scheduled", detail: `Epoch ${epoch.number} was canceled.` };
-}
-
 export function unavailableCopy(state: Exclude<LpVaultDisplayState, "ready">): {
   title: string;
   detail: string;
@@ -454,5 +552,13 @@ export function unavailableCopy(state: Exclude<LpVaultDisplayState, "ready">): {
       return { title: "Reconciliation time needs review", detail: "Capital figures are withheld because the latest timestamp is invalid." };
     case "reconciliation_stale":
       return { title: "Reconciliation is out of date", detail: "Capital figures are withheld until a current reconciliation is available." };
+    case "accounting_absent":
+      return { title: "Vault accounting is pending", detail: "Financial values will appear after the first verified daily accounting cycle." };
+    case "accounting_malformed":
+      return { title: "Vault accounting needs review", detail: "Financial values are withheld because the latest accounting record is incomplete." };
+    case "accounting_stale":
+      return { title: "Vault accounting is out of date", detail: "Financial values are withheld until a current accounting cycle is verified." };
+    case "accounting_mismatch":
+      return { title: "Vault evidence does not match", detail: "Financial values are withheld until accounting and reconciliation agree." };
   }
 }

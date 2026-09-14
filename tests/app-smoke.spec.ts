@@ -212,10 +212,32 @@ function mockApiOutcomes() {
 }
 
 function lpVaultFixture(asOf = new Date().toISOString()) {
+  const cycleCutoffAt = new Date(asOf);
+  cycleCutoffAt.setUTCHours(0, 0, 0, 0);
   return {
     mode: "shadow",
     network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
     depositsEnabled: false,
+    accounting: {
+      scope: "rolling_lp_shadow",
+      asOf,
+      processedAt: asOf,
+      cycleCutoffAt: cycleCutoffAt.toISOString(),
+      reconciliationId: "00000000-0000-4000-8000-000000000003",
+      bookVersion: "42",
+      canonicalBlockNumber: "9123456",
+      canonicalBlockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      economicNavMicroUnits: "50000000",
+      sharePriceMicroUnits: "1000000",
+      shareUnitsPerShare: "1000000000000000000",
+      activeShareUnits: "50000000000000000000",
+      pendingActivationMicroUnits: "5000000",
+      estimatedPnlMicroUnits: "-30000000",
+      finalizedPnlMicroUnits: "0",
+      markedUnresolvedLiabilityMicroUnits: "30000000",
+      fullLiabilityFallbackMicroUnits: "10000000",
+      liabilityMarkCoverageBps: 6667
+    },
     availability: "available",
     vault: {
       id: "00000000-0000-4000-8000-000000000001",
@@ -227,15 +249,11 @@ function lpVaultFixture(asOf = new Date().toISOString()) {
       treasuryAddress: "0x1d4fd58d9fc24c9f3c8da0deb4a05e7d122ef17b",
       tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238"
     },
-    epoch: {
-      id: "00000000-0000-4000-8000-000000000002",
-      number: 1,
-      status: "active",
-      startsAt: "2026-09-01T00:00:00.000Z"
-    },
     snapshot: {
       accountingScope: "global_house_book_not_lp_attributed",
+      reconciliationId: "00000000-0000-4000-8000-000000000003",
       asOf,
+      processedAt: asOf,
       blockNumber: "9123456",
       blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       treasuryAssetsUsd: 100,
@@ -415,22 +433,45 @@ test("LP Vault deep-link shows fresh collateral evidence and preserves browser n
 
   await nav.getByRole("button", { name: "LP Vault" }).click();
   await expect(page).toHaveURL(/#lp-vault$/);
-  await expect(page.getByRole("heading", { name: "House-book reserve monitor" })).toBeVisible();
-  await expect(page.getByText("Founder-funded Sepolia shadow", { exact: true })).toBeVisible();
-  await expect(page.getByText("Observed house treasury", { exact: true })).toBeVisible();
-  await expect(page.getByText("Global house-book USDC, not segregated LP assets.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Community LP activity is not live", { exact: true })).toBeVisible();
-  await expect(page.getByText(/This is not a deposit or withdrawal window\./)).toBeVisible();
-  await expect(page.getByText(/Modeled capital surplus/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LEGWORK LP Vault" })).toBeVisible();
+  await expect(page.getByText("Founder-funded Sepolia shadow · Deposits unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("Verified assets", { exact: true })).toBeVisible();
+  await expect(page.getByText("Maximum live-ticket payout", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payout coverage", { exact: true })).toBeVisible();
+  await expect(page.getByText("Collateral state", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Reserve current ·/)).toBeVisible();
+  await expect(page.getByText(/Accounting current ·/)).toBeVisible();
+  await expect(page.getByText(/reserve view uses current reconciliation evidence/i)).toBeVisible();
+  await expect(page.getByText(/rolling accounting uses its own canonical daily checkpoint and block evidence/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Canonical economic value" })).toBeVisible();
+  await expect(page.getByText("Economic NAV", { exact: true })).toBeVisible();
+  await expect(page.getByText("Share price", { exact: true })).toBeVisible();
+  await expect(page.getByText("Pending activation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Estimated P&L", { exact: true })).toBeVisible();
+  await expect(page.getByText("Finalized P&L", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unresolved liability mark", { exact: true })).toBeVisible();
+  await expect(page.getByText(/66.67% mark evidence coverage/)).toBeVisible();
+  await expect(page.getByText(/Cycle cutoff/)).toBeVisible();
+  await expect(page.getByText("How rolling participation will work", { exact: true })).toBeVisible();
+  await expect(page.getByText(/remains pending P&L until the next 00:00 UTC cycle/i)).toBeVisible();
   await expect(page.getByText("Vault assets", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Shadow withdrawal capacity", { exact: false })).toHaveCount(0);
   await expect(page.getByText("Next liquidity window", { exact: false })).toHaveCount(0);
   await expect(page.getByText("New basket underwriting", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Minimum collateral required", { exact: true })).toBeVisible();
-  await expect(page.getByText("Modeled minimum after future LP withdrawals", { exact: true })).toBeVisible();
-  await expect(page.getByText("Modeled future LP withdrawal policy", { exact: true })).toBeVisible();
-  await expect(page.getByText(/If community LP withdrawals launch/)).toBeVisible();
-  await expect(page.getByText("Fully collateralized", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Shadow operating reserve floor", { exact: true })).toBeVisible();
+  await expect(page.getByText("Capacity above reserve floor", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fully collateralized", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /deposit|withdraw|redeem/i })).toHaveCount(0);
+  await expect(page.getByText(/APY/i)).toHaveCount(0);
+  const technicalEvidence = page.locator(".lp-vault__technical summary");
+  await expect(technicalEvidence).toContainText("Technical evidence and operating gates");
+  for (let step = 0; step < 8 && !(await technicalEvidence.evaluate((element) => document.activeElement === element)); step += 1) {
+    await page.keyboard.press("Tab");
+  }
+  await expect(technicalEvidence).toBeFocused();
+  expect(await technicalEvidence.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+  await page.keyboard.press("Enter");
   await expect(page.getByRole("link", { name: /Treasury/ })).toHaveAttribute("href", /sepolia\.etherscan\.io\/address\//);
   await expect(page.getByRole("link", { name: "View latest vault state JSON" })).toHaveAttribute("href", "/api/lp-vault");
   await expect(page.getByRole("link", { name: "View snapshot JSON" })).toHaveCount(0);
@@ -530,9 +571,9 @@ test("LP Vault withholds stale amounts and fits the 320px primary navigation", a
       mode: "shadow",
       network: { chainId: 11155111, name: "Sepolia", currency: "USDC" },
       depositsEnabled: false,
+      accounting: null,
       availability: "reconciliation_stale",
       vault: null,
-      epoch: null,
       snapshot: null
     })
   }));
@@ -547,6 +588,30 @@ test("LP Vault withholds stale amounts and fits the 320px primary navigation", a
   await expect(nav.getByRole("button", { name: "LP Vault" })).toBeVisible();
   const viewport = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
   expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.width);
+});
+
+test("LP Vault withholds an accounting cycle older than the daily freshness window", async ({ page }) => {
+  await page.unroute("**/api/lp-vault");
+  const fixture = lpVaultFixture();
+  const staleAccountingTime = new Date(Date.now() - 27 * 60 * 60_000).toISOString();
+  const staleCycleCutoff = new Date(staleAccountingTime);
+  staleCycleCutoff.setUTCHours(0, 0, 0, 0);
+  await page.route("**/api/lp-vault", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      ...fixture,
+      accounting: {
+        ...fixture.accounting,
+        asOf: staleAccountingTime,
+        cycleCutoffAt: staleCycleCutoff.toISOString()
+      }
+    })
+  }));
+  await page.goto("/#lp-vault");
+
+  await expect(page.getByText("Vault accounting is out of date")).toBeVisible();
+  await expect(page.getByText("$100.00")).toHaveCount(0);
+  await expect(page.getByText("Economic NAV", { exact: true })).toHaveCount(0);
 });
 
 test("LP Vault withholds a mounted snapshot exactly when its evidence expires", async ({ page }) => {

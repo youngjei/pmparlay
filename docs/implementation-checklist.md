@@ -1,7 +1,7 @@
 # LEGWORK Implementation Checklist
 
 Status: Canonical
-Last updated: 2026-09-04
+Last updated: 2026-09-12
 
 An item is complete only after implementation, automated testing, runtime verification, and independent QA when the risk or blast radius warrants it. The current release target is supervised Sepolia staging, not mainnet.
 
@@ -85,17 +85,36 @@ Polygon RPC is not required by the approved production trust model. The dormant 
 
 ## Sprint 5: LP Vault Shadow Foundation
 
-- [x] Record founder-approved epoch, economics, custody, full-collateral, withdrawal-ordering, and transparency policy in canonical documents.
-- [x] Add immutable founder-funded Sepolia shadow-vault and serial epoch metadata with PostgreSQL constraint coverage.
+- [x] Record founder-approved rolling-cycle, economics, custody, full-collateral, liquidity-gated redemption, and transparency policy in canonical documents.
+- [x] Add immutable founder-funded Sepolia shadow-vault metadata with PostgreSQL constraint coverage. The public API no longer exposes the retired serial-epoch model.
 - [x] Add an idempotent, deployment-safe provisioner pinned to the configured Sepolia Safe and Circle test USDC.
 - [x] Add deterministic micro-USDC solvency math for the 100% hard floor, 125% operating floor, pending basket capacity, and maximum junior outflow.
 - [x] Include active payment-intent capacity in worker reconciliation evidence, rounded and reserved separately per payment intent.
 - [x] Add a GET-only, rate-limited, no-store public vault endpoint that withholds stale, malformed, untrusted, or wrong-scope values.
-- [x] Add the `LP Vault` destination, source-linked reserve dashboard, conditional collateral health, loading/error recovery, and no fake LP financial actions.
+- [x] Add the `LP Vault` destination, one clear founder-shadow notice, verified reserve and collateral dashboard, progressive technical evidence, loading/error recovery, and no fake LP financial actions.
 - [x] Add frontend formula verification, independent five-minute stale expiry, fetch timeout, deep-link/back-forward checks, and 320px overflow coverage.
 - [x] Close independent post-remediation security/architecture and UX review with no critical or high-severity finding.
 - [ ] Deploy migrations `0044`, `0046`, and `0047`, run the shadow provisioner, produce a fresh reconciliation, and verify `/api/lp-vault` on Railway.
 
 Local checkpoint evidence on 2026-09-04: 528 unit tests, 57 PostgreSQL integration tests, 44 Chromium journeys, and four wallet-runtime journeys passed. Frontend and API typechecks, the production build, bundle budgets, a clean ARM64 Docker build, and the production-container HTTP smoke test passed. Clean `npm ci` installs and the local dependency audit reported zero vulnerabilities. Migrations `0044`, `0046`, and `0047` applied cleanly to the local development database; Railway deployment verification remains unchecked above.
 
-The next sprint is the vault-specific replayable shadow book. It includes immutable ticket/epoch attribution, book versions and events, protocol-fee payables, vault-scoped reconciliation, deterministic scenario limits, and simulated redemption plans. Community deposits, LP units, real LP withdrawals, and customer-quote enforcement remain out of scope until that shadow system passes concurrency, replay, legal, custody, and independent-review gates.
+## Sprint 6: Rolling LP Vault Accounting Foundation
+
+- [x] Replace fixed-cohort documentation and product copy with the approved rolling daily-cycle model.
+- [x] Use integer micro-USDC and fixed non-transferable share units for every canonical financial calculation.
+- [x] Record deposits as pending immediately and activate each exactly once at the next 00:00 UTC cycle using the common pre-deposit share price.
+- [x] Separate economic NAV, collateral solvency, estimated P&L, finalized P&L, and reserved redemption liquidity.
+- [x] Conservatively mark unresolved tickets and fall back to full offered payout when reliable pricing is unavailable.
+- [x] Implement the internal shadow redemption lifecycle: queued FIFO request, liquidity admission, active 72-hour redemption, binding end valuation, atomic burn, payable, and claimable state.
+- [x] Keep queued and admitted shares active in P&L and new exposure until end-period burn.
+- [x] Persist hash-chained events plus append-only cycles, liability marks, NAV checkpoints, share records, reserve marks, and closing states.
+- [x] Run one idempotent daily accounting worker inside the existing small-scale Railway financial-worker group without enabling public LP fund movement.
+- [x] Extend `GET /api/lp-vault` with independently fresh verified reserve and daily accounting evidence; unavailable data must never render as `$0`.
+- [x] Present verified assets, collateral coverage, rolling accounting, and the future LP lifecycle without fake deposit, withdrawal, return, or APY controls.
+- [x] Prove exact replay, duplicate prevention, restart behavior, deposit timing, settlement recognition, stale-source failure, and multiple daily cycles with zero unexplained micro-USDC difference.
+- [x] Pass unit, real PostgreSQL, API, build, desktop, and mobile tests.
+- [x] Close independent `gpt-5.6-sol` accounting/security and product/UX reviews with no unresolved critical or high-severity finding.
+
+Community deposits, wallet-owned LP shares, real LP withdrawals, and customer-quote enforcement remain out of scope until this foundation and the later legal, dedicated-custody, risk, and independent-audit gates pass.
+
+Foundation evidence on 2026-09-12: 609 unit tests, 71 real PostgreSQL tests, and four Chromium LP Vault journeys passed; one unrelated legacy direct-pay migration case remains intentionally skipped. API typecheck, production build, frontend bundle budgets, `git diff --check`, and the production dependency audit also passed, with zero reported vulnerabilities. Two independent `gpt-5.6-sol` reviews found no unresolved critical or high-severity issue. Reconciliation admission accepts only a confirmation-safe canonical block whose source-evidence timestamp is no more than five minutes old. The source evidence time (`asOf`) and worker completion time (`processedAt`) are retained separately. Before public LP funds, add a monotonic financial-book serialization boundary, deterministic missed-cutoff recovery, and projection-by-projection replay verification.

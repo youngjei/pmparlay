@@ -183,8 +183,9 @@ describe("trusted reconciliation snapshot scope", () => {
           treasuryAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
           tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
           balanceMicroUnits: 5_000_000n,
-          blockNumber: 100n,
-          blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            blockNumber: 100n,
+            blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            blockTimestamp: 1_767_225_600n,
           source: "onchain"
         }
       ],
@@ -208,6 +209,7 @@ describe("trusted reconciliation snapshot scope", () => {
         balanceMicroUnits: "5000000",
         blockNumber: "100",
         blockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        blockTimestamp: "1767225600",
         source: "onchain"
       }
     ]);
@@ -221,6 +223,8 @@ describe("trusted reconciliation snapshot scope", () => {
       softReservationStakeMicroUnits: "0",
       softReservationGrossPayoutMicroUnits: "0",
       softReservationOperatingChargeMicroUnits: "0",
+      grossUnresolvedLiveTicketPayoutMicroUnits: "0",
+      observedBlockTimestamp: "1767225600",
       treasuryAssetCount: "1"
     }));
   });

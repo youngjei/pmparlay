@@ -56,6 +56,9 @@ export type VerifiedLpVaultAccounting = {
   vaultId: string;
   cycleId: string;
   cutoffDate: string;
+  closeMode: "on_time" | "unchanged_state_recovery";
+  sourceDelayMs: bigint;
+  recoveryBeforeSnapshotId?: string;
   asOf: Date;
   processedAt: Date;
   reconciliationId: string;
@@ -107,6 +110,41 @@ const NON_VALUING_POST_CLOSE_EVENT_TYPES = new Set<LpVaultAccountingEventType>([
   "redemption_redeeming",
   "redemption_reserved",
   "redemption_canceled"
+]);
+
+const DIRECT_PROJECTION_EVENT_TYPES = new Set<LpVaultAccountingEventType>([
+  "accounting_incepted",
+  "cycle_opened",
+  "liability_marked",
+  "ticket_liability_marked",
+  "settlement_recognized",
+  "nav_checkpointed",
+  "liquidity_marked",
+  "protocol_fee_accrued",
+  "protocol_fee_released",
+  "expense_accrued",
+  "deposit_pending",
+  "redemption_requested",
+  "redemption_waiting",
+  "redemption_admitted",
+  "redemption_reserve_marked",
+  "cycle_closed"
+]);
+
+const REDEMPTION_STATUS_BY_EVENT = new Map<LpVaultAccountingEventType, string>([
+  ["redemption_requested", "queued"],
+  ["redemption_waiting", "waiting_liquidity"],
+  ["redemption_admitted", "admitted"],
+  ["redemption_redeeming", "redeeming"],
+  ["redemption_finalized", "finalized"],
+  ["redemption_claimable", "claimable"],
+  ["redemption_canceled", "canceled"]
+]);
+
+const REDEMPTION_LIFECYCLE_PROJECTION_EVENT_TYPES = new Set<LpVaultAccountingEventType>([
+  "redemption_redeeming",
+  "redemption_finalized",
+  "redemption_claimable"
 ]);
 
 export type LpVaultOwnerPendingDeposit = {
@@ -184,6 +222,8 @@ export type CloseLpVaultCycleInput = {
   cycleId: string;
   reconciliationId: string;
   sourceMaxAgeMs: number;
+  closeMode?: "on_time" | "unchanged_state_recovery";
+  recoveryBeforeSnapshotId?: string;
   ticketMarks: readonly TicketLiabilityMarkWrite[];
 };
 
@@ -312,9 +352,11 @@ export async function runLpVaultAccountingTransaction<T>(
 ): Promise<T> {
   const client = await pool.connect();
   try {
-    // The transaction lock is the serialization boundary. READ COMMITTED takes
-    // a fresh snapshot after a waiter acquires the lock and observes its predecessor's commit.
+    // Global financial state must be locked before the vault-specific lock.
+    // READ COMMITTED then observes the latest committed money mutation.
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+    await lockFinancialControlGateForMutation(client);
+    await client.query("SELECT set_config('legwork.financial_global_exclusive_lock', 'held', true)");
     await acquireLpVaultAccountingAdvisoryLock(client, vaultId);
     const result = await run(client);
     await client.query("COMMIT");
@@ -508,10 +550,15 @@ export async function admitNextLpVaultRedemption(
   if(requiredLiquidityMicroUnits>availableLiquidityBeforeMicroUnits){
     if(request.status==="queued"){
       const eventId=randomUUID();
-      await appendLpVaultAccountingEvent(client,{vaultId:input.vaultId,eventType:"redemption_waiting",entityId:eventId,
+      const event=await appendLpVaultAccountingEvent(client,{vaultId:input.vaultId,eventType:"redemption_waiting",entityId:eventId,
         payload:{requestId:request.request_id,reconciliationSnapshotId:input.reconciliationSnapshotId,
           requiredLiquidityMicroUnits:requiredLiquidityMicroUnits.toString(),
           availableLiquidityBeforeMicroUnits:availableLiquidityBeforeMicroUnits.toString()}});
+      await client.query(`INSERT INTO lp_vault_redemption_waiting_evidence (
+        id,vault_id,redemption_request_id,source_reconciliation_snapshot_id,required_liquidity_micro_units,
+        available_liquidity_before_micro_units,accounting_event_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,[eventId,input.vaultId,request.request_id,input.reconciliationSnapshotId,
+        requiredLiquidityMicroUnits.toString(),availableLiquidityBeforeMicroUnits.toString(),event.id]);
       await client.query(`UPDATE lp_vault_redemption_requests SET status='waiting_liquidity' WHERE id=$1`,[request.request_id]);
     }
     return {status:"waiting_liquidity",vaultId:input.vaultId,requestId:request.request_id,
@@ -1032,8 +1079,22 @@ export async function closeLpVaultAccountingCycle(
   input: CloseLpVaultCycleInput
 ): Promise<VerifiedLpVaultAccounting> {
   await acquireLpVaultAccountingAdvisoryLock(client, input.vaultId);
+  const lockContext = await client.query<{ lock_context: string | null }>(
+    "SELECT current_setting('legwork.financial_global_exclusive_lock', true) AS lock_context"
+  );
+  if (lockContext.rows[0]?.lock_context !== "held") {
+    throw new Error("lp_vault_accounting_global_lock_required");
+  }
   if (!Number.isSafeInteger(input.sourceMaxAgeMs) || input.sourceMaxAgeMs < 0 || input.sourceMaxAgeMs > 300_000) {
     throw new Error("invalid_lp_vault_source_max_age_ms");
+  }
+  const closeMode = input.closeMode ?? "on_time";
+  if (closeMode !== "on_time" && closeMode !== "unchanged_state_recovery") {
+    throw new Error("invalid_lp_vault_close_mode");
+  }
+  if ((closeMode === "on_time" && input.recoveryBeforeSnapshotId !== undefined)
+    || (closeMode === "unchanged_state_recovery" && !input.recoveryBeforeSnapshotId)) {
+    throw new Error("invalid_lp_vault_recovery_evidence");
   }
   const cycle = await client.query<{ cutoff_date: string; status: string }>(
     `SELECT cutoff_date::text, status FROM lp_vault_daily_cycles WHERE id=$1 AND vault_id=$2 FOR UPDATE`,
@@ -1049,27 +1110,67 @@ export async function closeLpVaultAccountingCycle(
   const reconciliation = await client.query<{
     created_at: Date; source_as_of: Date; treasury_assets_micro_units: string; user_available_micro_units: string;
     user_claimable_micro_units: string; user_checkout_micro_units: string; pending_withdrawal_micro_units: string;
-    observed_block_number: string; observed_block_hash: string
+    observed_block_number: string; observed_block_hash: string; financial_book_version: string;
+    financial_state_hash: string; source_delay_ms: string
   }>(
     `SELECT created_at,
        to_timestamp((metrics->>'observedBlockTimestamp')::double precision) AS source_as_of,
        treasury_assets_micro_units::text, user_available_micro_units::text,
        user_claimable_micro_units::text, user_checkout_micro_units::text, pending_withdrawal_micro_units::text,
-       observed_block_number::text, observed_block_hash
+       observed_block_number::text, observed_block_hash, financial_book_version::text, financial_state_hash,
+       GREATEST(0, floor(extract(epoch FROM (
+         to_timestamp((metrics->>'observedBlockTimestamp')::double precision)
+           - ($2::date::timestamp AT TIME ZONE 'UTC')
+       )) * 1000)::bigint)::text AS source_delay_ms
      FROM financial_reconciliation_snapshots
      WHERE id=$1 AND source='worker' AND unexplained_delta_micro_units=0
        AND COALESCE(metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
        AND to_timestamp((metrics->>'observedBlockTimestamp')::double precision)
          >= ($2::date::timestamp AT TIME ZONE 'UTC')
-       AND to_timestamp((metrics->>'observedBlockTimestamp')::double precision)
-         <= ($2::date::timestamp AT TIME ZONE 'UTC') + ($3::bigint * interval '1 millisecond')
        AND to_timestamp((metrics->>'observedBlockTimestamp')::double precision) <= created_at
-       AND created_at >= ($2::date::timestamp AT TIME ZONE 'UTC')
-       AND created_at <= ($2::date::timestamp AT TIME ZONE 'UTC') + ($3::bigint * interval '1 millisecond')`,
-    [input.reconciliationId, cycle.rows[0].cutoff_date, input.sourceMaxAgeMs]
+       AND (
+         ($4 = 'on_time'
+           AND to_timestamp((metrics->>'observedBlockTimestamp')::double precision)
+             <= ($2::date::timestamp AT TIME ZONE 'UTC') + ($3::bigint * interval '1 millisecond')
+           AND created_at >= ($2::date::timestamp AT TIME ZONE 'UTC')
+           AND created_at <= ($2::date::timestamp AT TIME ZONE 'UTC') + ($3::bigint * interval '1 millisecond'))
+         OR
+         ($4 = 'unchanged_state_recovery')
+       )`,
+    [input.reconciliationId, cycle.rows[0].cutoff_date, input.sourceMaxAgeMs, closeMode]
   );
   if (!reconciliation.rows[0]?.observed_block_hash || reconciliation.rows[0].observed_block_number === null) {
     throw new Error("lp_vault_reconciliation_stale_or_untrusted");
+  }
+  const financialBook = await client.query<{ book_version: string }>(
+    "SELECT book_version::text FROM financial_book_state WHERE scope='global' FOR SHARE"
+  );
+  if (!financialBook.rows[0]
+    || financialBook.rows[0].book_version !== reconciliation.rows[0].financial_book_version) {
+    throw new Error("lp_vault_reconciliation_book_version_stale");
+  }
+  if (!reconciliation.rows[0].financial_state_hash) {
+    throw new Error("lp_vault_reconciliation_state_hash_missing");
+  }
+  if (closeMode === "unchanged_state_recovery") {
+    const before = await client.query<{ financial_book_version: string; financial_state_hash: string }>(
+      `SELECT financial_book_version::text,financial_state_hash
+       FROM financial_reconciliation_snapshots
+       WHERE id=$1 AND source='worker' AND unexplained_delta_micro_units=0
+         AND chain_id=(SELECT chain_id FROM financial_reconciliation_snapshots WHERE id=$2)
+         AND currency=(SELECT currency FROM financial_reconciliation_snapshots WHERE id=$2)
+         AND lower(scope_treasury_address)=lower((SELECT scope_treasury_address FROM financial_reconciliation_snapshots WHERE id=$2))
+         AND lower(scope_token_address)=lower((SELECT scope_token_address FROM financial_reconciliation_snapshots WHERE id=$2))
+         AND COALESCE(metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
+         AND to_timestamp((metrics->>'observedBlockTimestamp')::double precision)
+           <= ($3::date::timestamp AT TIME ZONE 'UTC')`,
+      [input.recoveryBeforeSnapshotId, input.reconciliationId, cycle.rows[0].cutoff_date]
+    );
+    if (!before.rows[0]
+      || before.rows[0].financial_book_version !== reconciliation.rows[0].financial_book_version
+      || before.rows[0].financial_state_hash !== reconciliation.rows[0].financial_state_hash) {
+      throw new Error("lp_vault_due_cycle_recovery_unsafe");
+    }
   }
   await recognizeLpVaultFeesAndSettlements(client, {
     vaultId: input.vaultId,
@@ -1142,11 +1243,14 @@ export async function closeLpVaultAccountingCycle(
     id,vault_id,cycle_id,source_reconciliation_snapshot_id,canonical_block_number,canonical_block_hash,
     senior_user_obligations_micro_units,gross_unresolved_payouts_micro_units,marked_unresolved_liability_micro_units,
     protocol_fee_payable_micro_units,approved_expense_payable_micro_units,pending_deposit_liability_micro_units,
-    matured_redemption_payable_micro_units,nav_deductions_micro_units,accounting_event_id)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+    matured_redemption_payable_micro_units,nav_deductions_micro_units,accounting_event_id,source_mode,
+    financial_book_version,financial_state_hash,recovery_before_snapshot_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
     [liabilityId,input.vaultId,input.cycleId,input.reconciliationId,reconciliation.rows[0].observed_block_number,
       reconciliation.rows[0].observed_block_hash,senior.toString(),gross.toString(),marked.toString(),sums.rows[0].protocol_fee,
-      sums.rows[0].expenses,sums.rows[0].pending,sums.rows[0].matured,deductions.toString(),liabilityEvent.id]);
+      sums.rows[0].expenses,sums.rows[0].pending,sums.rows[0].matured,deductions.toString(),liabilityEvent.id,
+      closeMode,reconciliation.rows[0].financial_book_version,reconciliation.rows[0].financial_state_hash,
+      input.recoveryBeforeSnapshotId??null]);
   await client.query(`UPDATE lp_vault_daily_cycles SET status='marked',marked_at=now() WHERE id=$1`,[input.cycleId]);
   const prior=await client.query<{id:string}>(`SELECT id FROM lp_vault_nav_checkpoints WHERE vault_id=$1 ORDER BY accounting_version DESC LIMIT 1`,[input.vaultId]);
   const checkpointId=randomUUID();
@@ -1222,7 +1326,10 @@ export async function closeLpVaultAccountingCycle(
     protocol_rounding_dust_micro_units,closing_economic_nav_micro_units,closing_share_supply_units,accounting_event_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[closingId,input.vaultId,input.cycleId,checkpointId,
       closing.rows[0].activated,closing.rows[0].matured,protocolDust.toString(),closingNav.toString(),closing.rows[0].supply,closingEvent.id]);
-  await client.query(`UPDATE lp_vault_daily_cycles SET status='closed',closed_at=now() WHERE id=$1`,[input.cycleId]);
+  await client.query(`UPDATE lp_vault_daily_cycles
+    SET status='closed',closed_at=now(),close_mode=$2,source_delay_ms=$3,recovery_before_snapshot_id=$4
+    WHERE id=$1`,[input.cycleId,closeMode,reconciliation.rows[0].source_delay_ms,
+      input.recoveryBeforeSnapshotId ?? null]);
   const loaded=await loadLatestVerifiedLpVaultAccounting(input.vaultId,client);
   if(!loaded) throw new Error("lp_vault_closed_cycle_unavailable");
   return loaded;
@@ -1233,11 +1340,14 @@ export async function loadLatestVerifiedLpVaultAccounting(
   queryable: LpVaultAccountingQueryable = getPool()
 ): Promise<VerifiedLpVaultAccounting | undefined> {
   const result=await queryable.query<{
-    vault_id:string;cycle_id:string;cutoff_date:string;as_of:Date|null;processed_at:Date;reconciliation_id:string;book_version:string;
+    vault_id:string;cycle_id:string;cutoff_date:string;close_mode:"on_time"|"unchanged_state_recovery"|null;
+    source_delay_ms:string|null;recovery_before_snapshot_id:string|null;as_of:Date|null;processed_at:Date;
+    reconciliation_id:string;book_version:string;
     canonical_block_number:string;canonical_block_hash:string;gross_assets:string;nav:string;supply:string;
     price_numerator:string;price_denominator:string;pending:string;estimated:string;finalized:string;marked:string;gross:string;
     fallback:string;ticket_count:string;reliable_count:string;active_reserve:string;collateral:string;free:string
-  }>(`SELECT checkpoints.vault_id,cycles.id AS cycle_id,cycles.cutoff_date::text,
+  }>(`SELECT checkpoints.vault_id,cycles.id AS cycle_id,cycles.cutoff_date::text,cycles.close_mode,
+      cycles.source_delay_ms::text,cycles.recovery_before_snapshot_id::text,
       CASE WHEN COALESCE(source_reconciliation.metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
         THEN to_timestamp((source_reconciliation.metrics->>'observedBlockTimestamp')::double precision)
         ELSE NULL END AS as_of,
@@ -1281,11 +1391,21 @@ export async function loadLatestVerifiedLpVaultAccounting(
       FROM lp_vault_ticket_liability_marks WHERE cycle_id=cycles.id) ticket_marks ON true
     WHERE cycles.vault_id=$1 AND cycles.status='closed' ORDER BY cycles.cutoff_date DESC LIMIT 1`,[vaultId]);
   const row=result.rows[0]; if(!row)return undefined;
+  // 0048 cycles have no close evidence. Withhold them until a canonical 0049 close
+  // rather than treating an upgrade backfill as verified accounting.
+  if(row.close_mode===null&&row.source_delay_ms===null&&row.recovery_before_snapshot_id===null) return undefined;
   if(!row.as_of||row.processed_at<row.as_of) throw new Error("lp_vault_accounting_source_time_invalid");
   const ticketCount=BigInt(row.ticket_count); const reliableCount=BigInt(row.reliable_count);
   if(ticketCount<0n||reliableCount<0n||reliableCount>ticketCount)
     throw new Error("lp_vault_liability_mark_coverage_invalid");
-  return {vaultId:row.vault_id,cycleId:row.cycle_id,cutoffDate:row.cutoff_date,asOf:row.as_of,processedAt:row.processed_at,
+  if(!["on_time","unchanged_state_recovery"].includes(row.close_mode??"")||row.source_delay_ms===null
+    ||BigInt(row.source_delay_ms)<0n)
+    throw new Error("lp_vault_accounting_close_evidence_invalid");
+  const closeMode=row.close_mode as "on_time"|"unchanged_state_recovery";
+  return {vaultId:row.vault_id,cycleId:row.cycle_id,cutoffDate:row.cutoff_date,closeMode,
+    sourceDelayMs:BigInt(row.source_delay_ms),
+    ...(row.recovery_before_snapshot_id?{recoveryBeforeSnapshotId:row.recovery_before_snapshot_id}:{}),
+    asOf:row.as_of,processedAt:row.processed_at,
     reconciliationId:row.reconciliation_id,bookVersion:BigInt(row.book_version),canonicalBlockNumber:BigInt(row.canonical_block_number),
     canonicalBlockHash:row.canonical_block_hash,grossAssetsMicroUnits:BigInt(row.gross_assets),economicNavMicroUnits:BigInt(row.nav),
     activeShareUnits:BigInt(row.supply),sharePriceNumeratorMicroUnits:BigInt(row.price_numerator),
@@ -1510,6 +1630,244 @@ export async function replayLpVaultAccounting(
   if(shareEventProjection.rows.length!==shareEventCount
     ||shareEventProjection.rows.some(row=>!row.projection_matches))
     throw new Error("lp_vault_accounting_share_projection_mismatch");
+
+  const directProjection=await queryable.query<{
+    accounting_event_id:string;expected_event_type:LpVaultAccountingEventType;expected_entity_id:string;projection_matches:boolean;
+  }>(`WITH projections AS (
+      SELECT inceptions.accounting_event_id,'accounting_incepted'::text AS expected_event_type,inceptions.vault_id::text AS expected_entity_id,
+        jsonb_build_object(
+          'reconciliationId',inceptions.source_reconciliation_snapshot_id::text,
+          'founderSeedResidualMicroUnits',inceptions.founder_seed_residual_micro_units::text
+        ) AS expected_payload
+      FROM lp_vault_accounting_inceptions inceptions WHERE inceptions.vault_id=$1
+      UNION ALL SELECT cycles.opened_event_id,'cycle_opened',cycles.id::text,
+        jsonb_build_object('cutoffDate',cycles.cutoff_date::text)
+      FROM lp_vault_daily_cycles cycles WHERE cycles.vault_id=$1
+      UNION ALL SELECT liabilities.accounting_event_id,'liability_marked',liabilities.id::text,
+        jsonb_build_object(
+          'cycleId',liabilities.cycle_id::text,
+          'reconciliationId',liabilities.source_reconciliation_snapshot_id::text,
+          'grossAssetsMicroUnits',snapshots.treasury_assets_micro_units::text,
+          'navDeductionsMicroUnits',liabilities.nav_deductions_micro_units::text
+        )
+      FROM lp_vault_liability_marks liabilities
+      JOIN financial_reconciliation_snapshots snapshots ON snapshots.id=liabilities.source_reconciliation_snapshot_id
+      WHERE liabilities.vault_id=$1
+      UNION ALL SELECT ticket_marks.accounting_event_id,'ticket_liability_marked',ticket_marks.id::text,
+        jsonb_build_object(
+          'ticketId',ticket_marks.ticket_id::text,
+          'markedLiabilityMicroUnits',ticket_marks.marked_liability_micro_units::text
+        )
+      FROM lp_vault_ticket_liability_marks ticket_marks WHERE ticket_marks.vault_id=$1
+      UNION ALL SELECT recognitions.accounting_event_id,'settlement_recognized',recognitions.id::text,
+        jsonb_build_object(
+          'ticketId',recognitions.ticket_id::text,
+          'settlementSummaryId',recognitions.settlement_summary_id::text,
+          'finalizedPnlMicroUnits',recognitions.finalized_pnl_micro_units::text
+        )
+      FROM lp_vault_settlement_recognitions recognitions WHERE recognitions.vault_id=$1
+      UNION ALL SELECT checkpoints.accounting_event_id,'nav_checkpointed',checkpoints.id::text,
+        jsonb_build_object(
+          'cycleId',checkpoints.cycle_id::text,
+          'liabilityMarkId',checkpoints.liability_mark_id::text,
+          'reconciliationId',checkpoints.source_reconciliation_snapshot_id::text,
+          'grossAssetsMicroUnits',checkpoints.gross_assets_micro_units::text,
+          'navDeductionsMicroUnits',liabilities.nav_deductions_micro_units::text,
+          'economicNavMicroUnits',checkpoints.net_asset_value_micro_units::text,
+          'shareSupplyUnits',checkpoints.share_supply_units::text
+        )
+      FROM lp_vault_nav_checkpoints checkpoints
+      JOIN lp_vault_liability_marks liabilities ON liabilities.id=checkpoints.liability_mark_id
+      WHERE checkpoints.vault_id=$1
+      UNION ALL SELECT liquidity.accounting_event_id,'liquidity_marked',liquidity.id::text,
+        jsonb_build_object('freeLiquidityMicroUnits',liquidity.free_liquidity_micro_units::text)
+      FROM lp_vault_liquidity_marks liquidity WHERE liquidity.vault_id=$1
+      UNION ALL SELECT fees.accounting_event_id,
+        CASE fees.event_type WHEN 'accrual' THEN 'protocol_fee_accrued' ELSE 'protocol_fee_released' END,fees.id::text,
+        CASE WHEN fees.event_type='accrual' THEN jsonb_build_object(
+          'ticketId',fees.ticket_id::text,
+          'reserveId',fees.ticket_reserve_id::text,
+          'amountMicroUnits',fees.amount_micro_units::text
+        ) ELSE jsonb_build_object(
+          'amountMicroUnits',fees.amount_micro_units::text,
+          'sourceReference',fees.source_reference
+        ) END
+      FROM lp_vault_protocol_fee_events fees WHERE fees.vault_id=$1
+      UNION ALL SELECT expenses.accounting_event_id,'expense_accrued',expenses.id::text,
+        jsonb_build_object(
+          'amountMicroUnits',expenses.amount_micro_units::text,
+          'approvalReference',expenses.approval_reference
+        )
+      FROM lp_vault_approved_expense_accruals expenses WHERE expenses.vault_id=$1
+      UNION ALL SELECT deposits.accounting_event_id,'deposit_pending',deposits.id::text,
+        CASE WHEN deposits.source_reference='${INTERNAL_FOUNDER_DEPOSIT_SOURCE}' THEN jsonb_build_object(
+          'amountMicroUnits',deposits.amount_micro_units::text,
+          'ownerId',deposits.user_id::text,
+          'sourceReference',deposits.source_reference
+        ) ELSE jsonb_build_object(
+          'userId',deposits.user_id::text,
+          'amountMicroUnits',deposits.amount_micro_units::text,
+          'sourceReference',deposits.source_reference
+        ) END
+      FROM lp_vault_pending_deposits deposits WHERE deposits.vault_id=$1
+      UNION ALL SELECT requests.accounting_event_id,'redemption_requested',requests.id::text,
+        jsonb_build_object(
+          'userId',positions.user_id::text,
+          'requestedShareUnits',requests.requested_share_units::text
+        )
+      FROM lp_vault_redemption_requests requests
+      JOIN lp_vault_share_positions positions ON positions.id=requests.position_id
+      WHERE requests.vault_id=$1
+      UNION ALL SELECT waiting.accounting_event_id,'redemption_waiting',waiting.id::text,
+        jsonb_build_object(
+          'requestId',waiting.redemption_request_id::text,
+          'reconciliationSnapshotId',waiting.source_reconciliation_snapshot_id::text,
+          'requiredLiquidityMicroUnits',waiting.required_liquidity_micro_units::text,
+          'availableLiquidityBeforeMicroUnits',waiting.available_liquidity_before_micro_units::text
+        )
+      FROM lp_vault_redemption_waiting_evidence waiting WHERE waiting.vault_id=$1
+      UNION ALL SELECT reserves.accounting_event_id,'redemption_admitted',reserves.id::text,
+        jsonb_build_object(
+          'requestId',reserves.redemption_request_id::text,
+          'reservedShareUnits',reserves.reserved_share_units::text,
+          'reconciliationSnapshotId',reserves.admission_reconciliation_snapshot_id::text,
+          'accountingCycleId',reserves.admission_accounting_cycle_id::text,
+          'accountingCheckpointId',reserves.admission_checkpoint_id::text,
+          'requiredLiquidityMicroUnits',reserves.required_liquidity_micro_units::text,
+          'availableLiquidityBeforeMicroUnits',reserves.available_liquidity_before_micro_units::text
+        )
+      FROM lp_vault_redemption_reserves reserves WHERE reserves.vault_id=$1
+      UNION ALL SELECT reserve_marks.accounting_event_id,'redemption_reserve_marked',reserve_marks.id::text,
+        jsonb_build_object(
+          'requestId',reserve_marks.redemption_request_id::text,
+          'reservedAmountMicroUnits',reserve_marks.reserved_amount_micro_units::text
+        )
+      FROM lp_vault_redemption_reserve_marks reserve_marks WHERE reserve_marks.vault_id=$1
+      UNION ALL SELECT closing.accounting_event_id,'cycle_closed',closing.id::text,
+        jsonb_build_object(
+          'cycleId',closing.cycle_id::text,
+          'checkpointId',closing.checkpoint_id::text,
+          'activatedDepositMicroUnits',closing.activated_deposit_micro_units::text,
+          'maturedRedemptionMicroUnits',closing.matured_redemption_micro_units::text,
+          'protocolRoundingDustMicroUnits',closing.protocol_rounding_dust_micro_units::text,
+          'closingEconomicNavMicroUnits',closing.closing_economic_nav_micro_units::text,
+          'closingShareSupplyUnits',closing.closing_share_supply_units::text
+        )
+      FROM lp_vault_cycle_closing_states closing WHERE closing.vault_id=$1
+    )
+    SELECT projections.accounting_event_id,projections.expected_event_type,projections.expected_entity_id,
+      accounting_events.payload=projections.expected_payload AS projection_matches
+    FROM projections
+    LEFT JOIN lp_vault_accounting_events accounting_events ON accounting_events.id=projections.accounting_event_id
+    ORDER BY projections.accounting_event_id`,[vaultId]);
+  const eventsById=new Map(events.rows.map(event=>[event.id,event]));
+  const directReferences=new Map<string,number>();
+  for(const projectionRow of directProjection.rows){
+    const event=eventsById.get(projectionRow.accounting_event_id);
+    if(!event||event.event_type!==projectionRow.expected_event_type
+      ||event.entity_id!==projectionRow.expected_entity_id||!projectionRow.projection_matches) {
+      throw new Error("lp_vault_accounting_direct_projection_mismatch");
+    }
+    directReferences.set(event.id,(directReferences.get(event.id)??0)+1);
+  }
+  for(const event of events.rows){
+    if(DIRECT_PROJECTION_EVENT_TYPES.has(event.event_type)&&directReferences.get(event.id)!==1)
+      throw new Error("lp_vault_accounting_direct_projection_mismatch");
+  }
+  if(directProjection.rows.length!==events.rows.filter(event=>DIRECT_PROJECTION_EVENT_TYPES.has(event.event_type)).length)
+    throw new Error("lp_vault_accounting_direct_projection_mismatch");
+
+  const redemptionLifecycleProjection=await queryable.query<{
+    accounting_event_id:string;projection_matches:boolean;
+  }>(`WITH lifecycle_events AS (
+      SELECT events.id,events.entity_id,events.event_type,events.payload
+      FROM lp_vault_accounting_events events
+      WHERE events.vault_id=$1 AND events.event_type IN (
+        'redemption_redeeming','redemption_finalized','redemption_claimable'
+      )
+    )
+    SELECT events.id AS accounting_event_id,
+      CASE
+        WHEN events.event_type='redemption_redeeming' AND events.payload ? 'reserveId' THEN
+          requests.id IS NOT NULL AND reserves.id IS NOT NULL
+          AND events.payload=jsonb_build_object('requestId',requests.id::text,'reserveId',reserves.id::text)
+        WHEN events.event_type='redemption_redeeming' THEN
+          requests.id IS NOT NULL
+          AND events.payload=jsonb_build_object('requestId',requests.id::text)
+        WHEN events.event_type='redemption_finalized' THEN
+          requests.id IS NOT NULL AND payables.id IS NOT NULL AND events.entity_id=requests.id
+          AND events.payload=jsonb_build_object(
+            'requestId',requests.id::text,
+            'payableId',payables.id::text,
+            'amountMicroUnits',payables.matured_amount_micro_units::text
+          )
+        WHEN events.event_type='redemption_claimable' THEN
+          requests.id IS NOT NULL AND payables.id IS NOT NULL AND events.entity_id=requests.id
+          AND events.payload=jsonb_build_object('requestId',requests.id::text,'payableId',payables.id::text)
+        ELSE false
+      END AS projection_matches
+    FROM lifecycle_events events
+    LEFT JOIN lp_vault_redemption_requests requests
+      ON requests.vault_id=$1 AND requests.id::text=events.payload->>'requestId'
+    LEFT JOIN lp_vault_redemption_reserves reserves
+      ON reserves.vault_id=$1 AND reserves.redemption_request_id=requests.id
+        AND reserves.id::text=events.payload->>'reserveId'
+    LEFT JOIN lp_vault_redemption_payables payables
+      ON payables.vault_id=$1 AND payables.redemption_request_id=requests.id
+    ORDER BY events.id`,[vaultId]);
+  const lifecycleReferences=new Map<string,number>();
+  for(const projectionRow of redemptionLifecycleProjection.rows){
+    const event=eventsById.get(projectionRow.accounting_event_id);
+    if(!event||!REDEMPTION_LIFECYCLE_PROJECTION_EVENT_TYPES.has(event.event_type)||!projectionRow.projection_matches)
+      throw new Error("lp_vault_accounting_redemption_lifecycle_projection_mismatch");
+    lifecycleReferences.set(event.id,(lifecycleReferences.get(event.id)??0)+1);
+  }
+  for(const event of events.rows){
+    if(REDEMPTION_LIFECYCLE_PROJECTION_EVENT_TYPES.has(event.event_type)&&lifecycleReferences.get(event.id)!==1)
+      throw new Error("lp_vault_accounting_redemption_lifecycle_projection_mismatch");
+  }
+  if(redemptionLifecycleProjection.rows.length!==events.rows.filter(event=>
+    REDEMPTION_LIFECYCLE_PROJECTION_EVENT_TYPES.has(event.event_type)).length)
+    throw new Error("lp_vault_accounting_redemption_lifecycle_projection_mismatch");
+
+  const expectedRedemptionHistory=new Map<string,string[]>();
+  for(const event of events.rows){
+    const status=REDEMPTION_STATUS_BY_EVENT.get(event.event_type);
+    if(!status) continue;
+    const requestId=event.event_type==="redemption_requested"
+      ?requireUuid(event.entity_id,"event_redemption_request_id")
+      :payloadUuid(event,"requestId");
+    expectedRedemptionHistory.set(requestId,[...(expectedRedemptionHistory.get(requestId)??[]),status]);
+  }
+  const redemptionHistory=await queryable.query<{request_id:string;from_status:string|null;to_status:string}>(
+    `SELECT requests.id::text AS request_id,history.from_status,history.to_status
+     FROM lp_vault_redemption_requests requests
+     JOIN lp_vault_redemption_request_history history ON history.redemption_request_id=requests.id
+     WHERE requests.vault_id=$1
+     ORDER BY requests.id,history.id`,[vaultId]
+  );
+  const projectedTransitions=new Map<string,string[]>();
+  for(const row of redemptionHistory.rows){
+    projectedTransitions.set(row.request_id,[...(projectedTransitions.get(row.request_id)??[]),
+      `${row.from_status??"null"}->${row.to_status}`]);
+  }
+  if(projectedTransitions.size!==expectedRedemptionHistory.size)
+    throw new Error("lp_vault_accounting_redemption_history_mismatch");
+  for(const [requestId,statuses] of expectedRedemptionHistory){
+    const expected=statuses.map((status,index)=>`${index===0?"null":statuses[index-1]}->${status}`).sort();
+    const projected=(projectedTransitions.get(requestId)??[]).sort();
+    if(expected.length!==projected.length||expected.some((transition,index)=>transition!==projected[index]))
+      throw new Error(`lp_vault_accounting_redemption_history_mismatch:${requestId}`);
+  }
+
+  const coveredTypes=new Set<LpVaultAccountingEventType>([
+    ...DIRECT_PROJECTION_EVENT_TYPES,
+    "deposit_activated",
+    "redemption_payable_matured",
+    ...REDEMPTION_STATUS_BY_EVENT.keys()
+  ]);
+  if(events.rows.some(event=>!coveredTypes.has(event.event_type)))
+    throw new Error("lp_vault_accounting_event_projection_unsupported");
   return {vaultId,eventCount:events.rows.length,firstBookVersion:1n,lastBookVersion:BigInt(events.rows.at(-1)!.book_version),
     lastEventHash:events.rows.at(-1)!.event_hash,lastClosedBookVersion:latestClosed.bookVersion,
     pendingTailEventCount:Number(BigInt(events.rows.length)-latestClosed.bookVersion),checkpointCount,shareEventCount,
@@ -1641,21 +1999,150 @@ export async function loadVerifiedLpVaultOwnerAccounting(
   }
 }
 
-export type RunDueLpVaultAccountingCycleResult = {
-  status: "created" | "already_closed";
+export type RunDueLpVaultAccountingCycleResult =
+  | {
+      status: "created" | "already_closed";
+      vaultId: string;
+      cycleId: string;
+      cutoffDate: string;
+      bookVersion: string;
+    }
+  | {
+      status: "waiting_first_cutoff";
+      vaultId: string;
+      cutoffDate: string;
+    };
+
+type DueLpVaultAccountingTarget = {
   vaultId: string;
-  cycleId: string;
   cutoffDate: string;
-  bookVersion: string;
+  reconciliationId: string;
+  closeMode: "on_time" | "unchanged_state_recovery";
+  recoveryBeforeSnapshotId?: string;
 };
+
+async function closeDueLpVaultAccountingTarget(
+  client: pg.PoolClient,
+  target: DueLpVaultAccountingTarget
+): Promise<RunDueLpVaultAccountingCycleResult> {
+  const { vaultId, cutoffDate, reconciliationId, closeMode, recoveryBeforeSnapshotId } = target;
+  const closed = await client.query<{ id: string; accounting_version: string }>(
+    `SELECT cycles.id,closing_event.book_version::text AS accounting_version FROM lp_vault_daily_cycles cycles
+     JOIN lp_vault_nav_checkpoints checkpoints ON checkpoints.cycle_id=cycles.id
+     JOIN lp_vault_cycle_closing_states closing ON closing.checkpoint_id=checkpoints.id
+     JOIN lp_vault_accounting_events closing_event ON closing_event.id=closing.accounting_event_id
+     WHERE cycles.vault_id=$1 AND cycles.cutoff_date=$2::date AND cycles.status='closed'`, [vaultId, cutoffDate]
+  );
+  if (closed.rows[0]) return { status:"already_closed",vaultId,cycleId:closed.rows[0].id,cutoffDate,
+    bookVersion:closed.rows[0].accounting_version };
+  const inception = await client.query<{ vault_id: string }>(
+    `SELECT vault_id FROM lp_vault_accounting_inceptions WHERE vault_id=$1`, [vaultId]
+  );
+  if (!inception.rows[0]) await inceptLpVaultAccounting(client,{vaultId,reconciliationId});
+  const cycle=await openOrGetLpVaultCycle(client,{vaultId,cutoffDate});
+  const reconciliation=await client.query<{created_at:Date}>(
+    `SELECT created_at FROM financial_reconciliation_snapshots WHERE id=$1`,[reconciliationId]
+  );
+  if(!reconciliation.rows[0]) throw new Error("lp_vault_reconciliation_missing");
+  const tickets=await loadUnresolvedLpVaultTicketsAsOf(client,reconciliation.rows[0].created_at);
+  const accounting=await closeLpVaultAccountingCycle(client,{vaultId,cycleId:cycle.id,reconciliationId,
+    sourceMaxAgeMs:ACCOUNTING_SOURCE_MAX_AGE_MS,closeMode,
+    ...(recoveryBeforeSnapshotId?{recoveryBeforeSnapshotId}:{}),
+    ticketMarks:tickets.map(ticket=>({ticketId:ticket.ticket_id,
+      markedLiabilityMicroUnits:BigInt(ticket.offered_payout_micro_units),markSource:"gross_payout_fallback" as const,
+      fallbackReason:"reliable unresolved-ticket mark unavailable",evidenceTime:reconciliation.rows[0].created_at}))});
+  return {status:"created",vaultId,cycleId:cycle.id,cutoffDate,bookVersion:accounting.bookVersion.toString()};
+}
+
+export async function closeDueLpVaultAccountingForReconciliation(
+  client: pg.PoolClient,
+  reconciliationId: string
+): Promise<RunDueLpVaultAccountingCycleResult | undefined> {
+  requireUuid(reconciliationId,"reconciliation_id");
+  const lockContext = await client.query<{ lock_context: string | null }>(
+    "SELECT current_setting('legwork.financial_global_exclusive_lock', true) AS lock_context"
+  );
+  if (lockContext.rows[0]?.lock_context !== "held") {
+    throw new Error("lp_vault_accounting_global_lock_required");
+  }
+  const target=await client.query<{
+    vault_id:string;cutoff_date:string;close_mode:"on_time"|"unchanged_state_recovery";
+    recovery_before_snapshot_id:string|null;
+  }>(`SELECT vaults.id AS vault_id,due.cutoff_date::text,
+      CASE WHEN snapshot.created_at <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+          + ($2::bigint * interval '1 millisecond')
+        AND to_timestamp((snapshot.metrics->>'observedBlockTimestamp')::double precision)
+          <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC') + ($2::bigint * interval '1 millisecond')
+        THEN 'on_time' ELSE 'unchanged_state_recovery' END AS close_mode,
+      CASE WHEN snapshot.created_at > (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+          + ($2::bigint * interval '1 millisecond')
+        OR to_timestamp((snapshot.metrics->>'observedBlockTimestamp')::double precision)
+          > (due.cutoff_date::timestamp AT TIME ZONE 'UTC') + ($2::bigint * interval '1 millisecond')
+        THEN before_cutoff.id END AS recovery_before_snapshot_id
+    FROM financial_reconciliation_snapshots snapshot
+    JOIN financial_book_state financial_book ON financial_book.scope='global'
+      AND financial_book.book_version=snapshot.financial_book_version
+    JOIN lp_vaults vaults ON vaults.chain_id=snapshot.chain_id AND vaults.currency=snapshot.currency
+      AND lower(vaults.treasury_address)=lower(snapshot.scope_treasury_address)
+      AND lower(vaults.token_address)=lower(snapshot.scope_token_address)
+    LEFT JOIN LATERAL (
+      SELECT cycles.cutoff_date FROM lp_vault_daily_cycles cycles
+      WHERE cycles.vault_id=vaults.id AND cycles.status='closed'
+      ORDER BY cycles.cutoff_date DESC LIMIT 1
+    ) closed ON true
+    JOIN LATERAL (SELECT CASE WHEN closed.cutoff_date IS NULL THEN (now() AT TIME ZONE 'UTC')::date
+      ELSE closed.cutoff_date+1 END AS cutoff_date) due ON true
+    LEFT JOIN LATERAL (
+      SELECT prior.id FROM financial_reconciliation_snapshots prior
+      WHERE prior.source='worker' AND prior.unexplained_delta_micro_units=0
+        AND prior.financial_book_version=snapshot.financial_book_version
+        AND prior.financial_state_hash=snapshot.financial_state_hash
+        AND prior.chain_id=snapshot.chain_id AND prior.currency=snapshot.currency
+        AND lower(prior.scope_treasury_address)=lower(snapshot.scope_treasury_address)
+        AND lower(prior.scope_token_address)=lower(snapshot.scope_token_address)
+        AND prior.observed_block_number IS NOT NULL AND prior.observed_block_hash IS NOT NULL
+        AND COALESCE(prior.metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
+        AND to_timestamp((prior.metrics->>'observedBlockTimestamp')::double precision)
+          <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+        AND to_timestamp((prior.metrics->>'observedBlockTimestamp')::double precision) <= prior.created_at
+        AND prior.created_at <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+      ORDER BY (prior.metrics->>'observedBlockTimestamp')::numeric DESC,prior.created_at DESC,prior.id DESC LIMIT 1
+    ) before_cutoff ON true
+    WHERE snapshot.id=$1 AND snapshot.source='worker' AND snapshot.unexplained_delta_micro_units=0
+      AND snapshot.financial_state_hash IS NOT NULL
+      AND snapshot.observed_block_number IS NOT NULL AND snapshot.observed_block_hash IS NOT NULL
+      AND COALESCE(snapshot.metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
+      AND to_timestamp((snapshot.metrics->>'observedBlockTimestamp')::double precision)
+        >= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+      AND to_timestamp((snapshot.metrics->>'observedBlockTimestamp')::double precision) <= snapshot.created_at
+      AND snapshot.created_at >= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+      AND due.cutoff_date <= (now() AT TIME ZONE 'UTC')::date
+      AND (closed.cutoff_date IS NULL OR closed.cutoff_date < (now() AT TIME ZONE 'UTC')::date)
+      AND (snapshot.created_at <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+          + ($2::bigint * interval '1 millisecond') OR before_cutoff.id IS NOT NULL)
+    LIMIT 1`,[reconciliationId,ACCOUNTING_SOURCE_MAX_AGE_MS]);
+  const row=target.rows[0];
+  if(!row) return undefined;
+  return await closeDueLpVaultAccountingTarget(client,{
+    vaultId:row.vault_id,cutoffDate:row.cutoff_date,reconciliationId,closeMode:row.close_mode,
+    ...(row.recovery_before_snapshot_id?{recoveryBeforeSnapshotId:row.recovery_before_snapshot_id}:{})
+  });
+}
 
 export async function runDueLpVaultAccountingCycle(
   options: { queryable?: pg.Pool } = {}
 ): Promise<RunDueLpVaultAccountingCycleResult> {
   const pool = options.queryable ?? getPool();
-  const target = await pool.query<{ vault_id: string; cutoff_date: string; reconciliation_id: string }>(
+  const target = await pool.query<{
+    vault_id: string; cutoff_date: string; reconciliation_id: string;
+    close_mode: "on_time" | "unchanged_state_recovery"; recovery_before_snapshot_id: string | null
+  }>(
     `SELECT vaults.id AS vault_id,due.cutoff_date::text,
-       CASE WHEN closed.cutoff_date=due.cutoff_date THEN closed.reconciliation_id ELSE reconciliation.id END AS reconciliation_id
+       CASE WHEN closed.cutoff_date=due.cutoff_date THEN closed.reconciliation_id
+         ELSE COALESCE(on_time.id,recovery.reconciliation_id) END AS reconciliation_id,
+       CASE WHEN on_time.id IS NOT NULL OR closed.cutoff_date=due.cutoff_date
+         THEN 'on_time' ELSE 'unchanged_state_recovery' END AS close_mode,
+       CASE WHEN on_time.id IS NULL THEN recovery.recovery_before_snapshot_id END AS recovery_before_snapshot_id
      FROM lp_vaults vaults
      LEFT JOIN LATERAL (
        SELECT cycles.cutoff_date,checkpoints.source_reconciliation_snapshot_id AS reconciliation_id
@@ -1671,9 +2158,13 @@ export async function runDueLpVaultAccountingCycle(
          ELSE closed.cutoff_date
        END AS cutoff_date
      ) due ON due.cutoff_date <= (now() AT TIME ZONE 'UTC')::date
-     JOIN LATERAL (
-       SELECT id FROM financial_reconciliation_snapshots snapshots
+     LEFT JOIN LATERAL (
+       SELECT snapshots.id
+       FROM financial_reconciliation_snapshots snapshots
+       JOIN financial_book_state financial_book ON financial_book.scope='global'
        WHERE snapshots.source='worker' AND snapshots.unexplained_delta_micro_units=0
+         AND snapshots.financial_book_version=financial_book.book_version
+         AND snapshots.financial_state_hash IS NOT NULL
          AND snapshots.chain_id=vaults.chain_id AND snapshots.currency=vaults.currency
          AND lower(snapshots.scope_treasury_address)=lower(vaults.treasury_address)
          AND lower(snapshots.scope_token_address)=lower(vaults.token_address)
@@ -1687,35 +2178,79 @@ export async function runDueLpVaultAccountingCycle(
          AND snapshots.created_at >= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
          AND snapshots.created_at <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
            + ($1::bigint * interval '1 millisecond')
-       ORDER BY (snapshots.metrics->>'observedBlockTimestamp')::NUMERIC ASC,snapshots.created_at ASC,snapshots.id ASC LIMIT 1
-     ) reconciliation ON true
+       ORDER BY (snapshots.metrics->>'observedBlockTimestamp')::NUMERIC ASC,
+         snapshots.created_at ASC,snapshots.id ASC LIMIT 1
+     ) on_time ON true
+     LEFT JOIN LATERAL (
+       SELECT after_cutoff.id AS reconciliation_id,before_cutoff.id AS recovery_before_snapshot_id
+       FROM LATERAL (
+         SELECT snapshots.id,snapshots.financial_book_version,snapshots.financial_state_hash
+         FROM financial_reconciliation_snapshots snapshots
+         JOIN financial_book_state financial_book ON financial_book.scope='global'
+         WHERE snapshots.source='worker' AND snapshots.unexplained_delta_micro_units=0
+           AND snapshots.financial_book_version=financial_book.book_version
+           AND snapshots.financial_state_hash IS NOT NULL
+           AND snapshots.chain_id=vaults.chain_id AND snapshots.currency=vaults.currency
+           AND lower(snapshots.scope_treasury_address)=lower(vaults.treasury_address)
+           AND lower(snapshots.scope_token_address)=lower(vaults.token_address)
+           AND snapshots.observed_block_number IS NOT NULL AND snapshots.observed_block_hash IS NOT NULL
+           AND COALESCE(snapshots.metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
+           AND to_timestamp((snapshots.metrics->>'observedBlockTimestamp')::double precision)
+             <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+           AND to_timestamp((snapshots.metrics->>'observedBlockTimestamp')::double precision) <= snapshots.created_at
+           AND snapshots.created_at <= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+         ORDER BY (snapshots.metrics->>'observedBlockTimestamp')::NUMERIC DESC,
+           snapshots.created_at DESC,snapshots.id DESC LIMIT 1
+       ) before_cutoff
+       JOIN LATERAL (
+         SELECT snapshots.id
+         FROM financial_reconciliation_snapshots snapshots
+         WHERE snapshots.source='worker' AND snapshots.unexplained_delta_micro_units=0
+           AND snapshots.financial_book_version=before_cutoff.financial_book_version
+           AND snapshots.financial_state_hash=before_cutoff.financial_state_hash
+           AND snapshots.chain_id=vaults.chain_id AND snapshots.currency=vaults.currency
+           AND lower(snapshots.scope_treasury_address)=lower(vaults.treasury_address)
+           AND lower(snapshots.scope_token_address)=lower(vaults.token_address)
+           AND snapshots.observed_block_number IS NOT NULL AND snapshots.observed_block_hash IS NOT NULL
+           AND COALESCE(snapshots.metrics->>'observedBlockTimestamp','') ~ '^[0-9]+$'
+           AND to_timestamp((snapshots.metrics->>'observedBlockTimestamp')::double precision)
+             >= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+           AND to_timestamp((snapshots.metrics->>'observedBlockTimestamp')::double precision) <= snapshots.created_at
+           AND snapshots.created_at >= (due.cutoff_date::timestamp AT TIME ZONE 'UTC')
+         ORDER BY (snapshots.metrics->>'observedBlockTimestamp')::NUMERIC ASC,
+           snapshots.created_at ASC,snapshots.id ASC LIMIT 1
+       ) after_cutoff ON true
+     ) recovery ON on_time.id IS NULL
      WHERE vaults.mode='shadow' AND vaults.community_custody=false AND vaults.deposits_enabled=false
+       AND (closed.cutoff_date=due.cutoff_date OR on_time.id IS NOT NULL OR recovery.reconciliation_id IS NOT NULL)
      LIMIT 1`, [ACCOUNTING_SOURCE_MAX_AGE_MS]
   );
-  if (!target.rows[0]) throw new Error("lp_vault_due_cycle_source_unavailable");
-  const { vault_id: vaultId, cutoff_date: cutoffDate, reconciliation_id: reconciliationId } = target.rows[0];
-  return await runLpVaultAccountingTransaction(vaultId, async (client) => {
-    const closed = await client.query<{ id: string; accounting_version: string }>(
-      `SELECT cycles.id,closing_event.book_version::text AS accounting_version FROM lp_vault_daily_cycles cycles
-       JOIN lp_vault_nav_checkpoints checkpoints ON checkpoints.cycle_id=cycles.id
-       JOIN lp_vault_cycle_closing_states closing ON closing.checkpoint_id=checkpoints.id
-       JOIN lp_vault_accounting_events closing_event ON closing_event.id=closing.accounting_event_id
-       WHERE cycles.vault_id=$1 AND cycles.cutoff_date=$2::date AND cycles.status='closed'`, [vaultId, cutoffDate]
+  if (!target.rows[0]) {
+    const bootstrap = await pool.query<{ vault_id: string; cutoff_date: string }>(
+      `SELECT vaults.id AS vault_id,
+         ((now() AT TIME ZONE 'UTC')::date + 1)::text AS cutoff_date
+       FROM lp_vaults vaults
+       JOIN financial_book_state financial_book ON financial_book.scope='global'
+       WHERE vaults.mode='shadow' AND vaults.community_custody=false AND vaults.deposits_enabled=false
+         AND financial_book.created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+         AND NOT EXISTS (
+           SELECT 1 FROM lp_vault_accounting_inceptions inceptions WHERE inceptions.vault_id=vaults.id
+         )
+       LIMIT 1`
     );
-    if (closed.rows[0]) return { status:"already_closed" as const,vaultId,cycleId:closed.rows[0].id,cutoffDate,
-      bookVersion:closed.rows[0].accounting_version };
-    const inception = await client.query<{ vault_id: string }>(
-      `SELECT vault_id FROM lp_vault_accounting_inceptions WHERE vault_id=$1`, [vaultId]
-    );
-    if (!inception.rows[0]) await inceptLpVaultAccounting(client,{vaultId,reconciliationId});
-    const cycle=await openOrGetLpVaultCycle(client,{vaultId,cutoffDate});
-    const reconciliation=await client.query<{created_at:Date}>(`SELECT created_at FROM financial_reconciliation_snapshots WHERE id=$1`,[reconciliationId]);
-    if(!reconciliation.rows[0]) throw new Error("lp_vault_reconciliation_missing");
-    const tickets=await loadUnresolvedLpVaultTicketsAsOf(client,reconciliation.rows[0].created_at);
-    const accounting=await closeLpVaultAccountingCycle(client,{vaultId,cycleId:cycle.id,reconciliationId,
-      sourceMaxAgeMs:ACCOUNTING_SOURCE_MAX_AGE_MS,ticketMarks:tickets.map(ticket=>({ticketId:ticket.ticket_id,
-        markedLiabilityMicroUnits:BigInt(ticket.offered_payout_micro_units),markSource:"gross_payout_fallback" as const,
-        fallbackReason:"reliable unresolved-ticket mark unavailable",evidenceTime:reconciliation.rows[0].created_at}))});
-    return {status:"created" as const,vaultId,cycleId:cycle.id,cutoffDate,bookVersion:accounting.bookVersion.toString()};
-  },pool);
+    if (bootstrap.rows[0]) {
+      return {
+        status: "waiting_first_cutoff",
+        vaultId: bootstrap.rows[0].vault_id,
+        cutoffDate: bootstrap.rows[0].cutoff_date
+      };
+    }
+    throw new Error("lp_vault_due_cycle_source_unavailable");
+  }
+  const { vault_id: vaultId, cutoff_date: cutoffDate, reconciliation_id: reconciliationId,
+    close_mode: closeMode, recovery_before_snapshot_id: recoveryBeforeSnapshotId } = target.rows[0];
+  return await runLpVaultAccountingTransaction(vaultId, client=>closeDueLpVaultAccountingTarget(client,{
+    vaultId,cutoffDate,reconciliationId,closeMode,
+    ...(recoveryBeforeSnapshotId?{recoveryBeforeSnapshotId}:{})
+  }),pool);
 }

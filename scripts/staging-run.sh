@@ -5,13 +5,15 @@ root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$root/scripts/staging-env-files.sh"
 configure_staging_env_files "$root"
 log_dir="$root/.context/staging-logs"
-declare -a names=(api market deposit reconciliation settlement)
+declare -a names=(api market outbox deposit reconciliation settlement lp-vault-accounting)
 declare -a entries=(
   server/index.ts
   server/workers/marketIndexerWorker.ts
+  server/workers/outboxWorker.ts
   server/workers/usdcDepositScannerWorker.ts
   server/workers/reconciliationWorker.ts
   server/workers/settlementResolverWorker.ts
+  server/workers/lpVaultAccountingWorker.ts
 )
 declare -a pids=()
 

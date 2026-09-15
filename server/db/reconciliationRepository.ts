@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type pg from "pg";
 import { getAddress, isAddress, zeroAddress } from "viem";
 import { config } from "../config";
@@ -9,6 +10,7 @@ import { staticStagingTreasuryConfig, usesStaticStagingTreasury } from "../stagi
 import { getPool } from "./client";
 import {
   admitNextLpVaultRedemption,
+  closeDueLpVaultAccountingForReconciliation,
   type LpVaultRedemptionAdmissionResult
 } from "./lpVaultAccountingRepository";
 
@@ -169,6 +171,27 @@ function normalizeBlockHash(value: string) {
   const blockHash = value.trim().toLowerCase();
   if (!/^0x[a-f0-9]{64}$/.test(blockHash)) throw new Error("invalid_block_hash");
   return blockHash;
+}
+
+function financialStateHash(input: {
+  chainId: number;
+  currency: "USDC";
+  treasuryAssets: TrustedTreasuryAssetSnapshot[];
+  position: InternalReconciliationPosition;
+}) {
+  const assets = input.treasuryAssets.map((asset) => ({
+    chainId: asset.chainId,
+    treasuryAddress: asset.treasuryAddress,
+    tokenAddress: asset.tokenAddress,
+    balanceMicroUnits: asset.balanceMicroUnits.toString(),
+    source: asset.source
+  }));
+  const position = Object.fromEntries(
+    Object.entries(input.position).map(([key, value]) => [key, value.toString()])
+  );
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify({ chainId: input.chainId, currency: input.currency, assets, position }))
+    .digest("hex")}`;
 }
 
 function normalizeTrustedTreasuryAssets(input: {
@@ -388,6 +411,10 @@ async function createReconciliationSnapshotInTransaction(
   await lockFinancialControlGateForMutation(client);
   await client.query("SELECT set_config('legwork.financial_global_exclusive_lock', 'held', true)");
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`financial-reconciliation:${input.chainId}:${currency}`]);
+    const financialBook = await client.query<{ book_version: string }>(
+      "SELECT book_version::text FROM financial_book_state WHERE scope='global' FOR SHARE"
+    );
+    if (!financialBook.rows[0]) throw new Error("financial_book_state_missing");
     const scope = await loadActiveReconciliationScope(client, input.chainId);
     const treasuryAssets = normalizeTrustedTreasuryAssets({
       chainId: input.chainId,
@@ -450,6 +477,12 @@ async function createReconciliationSnapshotInTransaction(
       }))
     );
     const metricsJson = JSON.stringify(metrics);
+    const stateHash = financialStateHash({
+      chainId: input.chainId,
+      currency,
+      treasuryAssets,
+      position
+    });
 
     const result = await client.query<SnapshotRow>(
       `
@@ -475,7 +508,9 @@ async function createReconciliationSnapshotInTransaction(
           observed_block_hash,
           source,
           scope_treasury_address,
-          scope_token_address
+          scope_token_address,
+          financial_book_version,
+          financial_state_hash
         )
         VALUES (
           $1,
@@ -499,7 +534,9 @@ async function createReconciliationSnapshotInTransaction(
           $19,
           $20,
           $21,
-          $22
+          $22,
+          $23,
+          $24
         )
         RETURNING
           id,
@@ -549,7 +586,9 @@ async function createReconciliationSnapshotInTransaction(
         observedBlockHash || null,
         input.source,
         scope.treasuryAddress,
-        scope.tokenAddress
+        scope.tokenAddress,
+        financialBook.rows[0].book_version,
+        stateHash
       ]
     );
 
@@ -599,6 +638,7 @@ export async function createReconciliationSnapshot(input:CreateReconciliationSna
 
 export type ReconciliationSnapshotWithLpVaultAdmission = FinancialReconciliationSnapshot & {
   lpVaultAdmission?:LpVaultRedemptionAdmissionResult;
+  lpVaultAccounting?:Awaited<ReturnType<typeof closeDueLpVaultAccountingForReconciliation>>;
 };
 
 export async function createReconciliationSnapshotWithLpVaultAdmission(
@@ -619,7 +659,8 @@ export async function createReconciliationSnapshotWithLpVaultAdmission(
     const lpVaultAdmission=await admitNextLpVaultRedemption(client,{
       vaultId:vaults.rows[0].id,reconciliationSnapshotId:snapshot.id
     });
-    return {...snapshot,lpVaultAdmission};
+    const lpVaultAccounting=await closeDueLpVaultAccountingForReconciliation(client,snapshot.id);
+    return {...snapshot,lpVaultAdmission,...(lpVaultAccounting?{lpVaultAccounting}:{})};
   });
 }
 

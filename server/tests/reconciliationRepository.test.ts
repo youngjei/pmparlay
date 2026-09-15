@@ -223,6 +223,7 @@ describe("financial reconciliation", () => {
   it("publishes a blocked snapshot under the exclusive financial-control lock", async () => {
     db.clientQuery.mockImplementation(async (sql: string) => {
       const text = String(sql);
+      if (text.includes("FROM financial_book_state")) return { rows: [{ book_version: "7" }] };
       if (text.includes("FROM treasury_config")) {
         return { rows: [{ treasuryAddress, tokenAddress }] };
       }
@@ -284,6 +285,7 @@ describe("financial reconciliation", () => {
     async accountType=>{
       db.clientQuery.mockImplementation(async(sql:string)=>{
         const text=String(sql);
+        if(text.includes("FROM financial_book_state")) return {rows:[{book_version:"7"}]};
         if(text.includes("FROM treasury_config")) return {rows:[{treasuryAddress,tokenAddress}]};
         if(text.includes("GROUP BY ledger_accounts.account_type")) return {rows:[{account_type:accountType,balance:"-1"}]};
         if(text.includes("FROM ticket_reserves")) return {rows:[{stake:"0",operationFee:"0",reserve:"0",grossPayout:"0"}]};

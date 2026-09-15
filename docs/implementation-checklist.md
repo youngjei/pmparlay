@@ -1,7 +1,7 @@
 # LEGWORK Implementation Checklist
 
 Status: Canonical
-Last updated: 2026-09-12
+Last updated: 2026-09-15
 
 An item is complete only after implementation, automated testing, runtime verification, and independent QA when the risk or blast radius warrants it. The current release target is supervised Sepolia staging, not mainnet.
 
@@ -77,7 +77,7 @@ Polygon RPC is not required by the approved production trust model. The dormant 
 
 ## Deferred Beyond Sprint 4
 
-- [ ] Before mainnet: upgrade Railway and split the grouped workers into five isolated services: market indexer, deposits, reconciliation, settlements, and outbox.
+- [ ] Before mainnet: upgrade Railway and split the grouped workers into six isolated services: market indexer, outbox, deposits, reconciliation, settlements, and LP accounting.
 - Authenticated operator RBAC and production-grade dual approval.
 - Managed cloud deployment, external monitoring, and managed PITR rehearsal.
 - Mainnet Safe policy, legal/geo gates, bankroll approval, Polymarket API dependency review and disclosure, and external security audit.
@@ -94,7 +94,7 @@ Polygon RPC is not required by the approved production trust model. The dormant 
 - [x] Add the `LP Vault` destination, one clear founder-shadow notice, verified reserve and collateral dashboard, progressive technical evidence, loading/error recovery, and no fake LP financial actions.
 - [x] Add frontend formula verification, independent five-minute stale expiry, fetch timeout, deep-link/back-forward checks, and 320px overflow coverage.
 - [x] Close independent post-remediation security/architecture and UX review with no critical or high-severity finding.
-- [ ] Deploy migrations `0044`, `0046`, and `0047`, run the shadow provisioner, produce a fresh reconciliation, and verify `/api/lp-vault` on Railway.
+- [x] Deploy migrations `0044`, `0046`, and `0047`, run the shadow provisioner, produce a fresh reconciliation, and verify `/api/lp-vault` on Railway.
 
 Local checkpoint evidence on 2026-09-04: 528 unit tests, 57 PostgreSQL integration tests, 44 Chromium journeys, and four wallet-runtime journeys passed. Frontend and API typechecks, the production build, bundle budgets, a clean ARM64 Docker build, and the production-container HTTP smoke test passed. Clean `npm ci` installs and the local dependency audit reported zero vulnerabilities. Migrations `0044`, `0046`, and `0047` applied cleanly to the local development database; Railway deployment verification remains unchecked above.
 
@@ -118,3 +118,16 @@ Local checkpoint evidence on 2026-09-04: 528 unit tests, 57 PostgreSQL integrati
 Community deposits, wallet-owned LP shares, real LP withdrawals, and customer-quote enforcement remain out of scope until this foundation and the later legal, dedicated-custody, risk, and independent-audit gates pass.
 
 Foundation evidence on 2026-09-12: 609 unit tests, 71 real PostgreSQL tests, and four Chromium LP Vault journeys passed; one unrelated legacy direct-pay migration case remains intentionally skipped. API typecheck, production build, frontend bundle budgets, `git diff --check`, and the production dependency audit also passed, with zero reported vulnerabilities. Two independent `gpt-5.6-sol` reviews found no unresolved critical or high-severity issue. Reconciliation admission accepts only a confirmation-safe canonical block whose source-evidence timestamp is no more than five minutes old. The source evidence time (`asOf`) and worker completion time (`processedAt`) are retained separately. Before public LP funds, add a monotonic financial-book serialization boundary, deterministic missed-cutoff recovery, and projection-by-projection replay verification.
+
+## Sprint 6 Hardening Checkpoint
+
+- [x] Add a transactionally monotonic financial-book version covering ledger, ticket reserve, settlement, payment exposure, and withdrawal mutations.
+- [x] Hash canonical reconciled financial state and require the latest committed book version before cycle close.
+- [x] Recover a missed cutoff only from canonical snapshots that bracket it with an unchanged book version and state hash.
+- [x] Record immutable close mode, source delay, and recovery evidence on liability marks and daily cycles.
+- [x] Verify every accounting event against its direct projection or share/redemption lifecycle history.
+- [x] Add the LP accounting worker to production readiness and local staging supervision.
+- [x] Add an operator replay command for release verification.
+- [ ] Expand the attached Railway Postgres volume to at least 1 GB, create a Railway-native backup, deploy migration `0049`, and pass managed staging verification. Hobby billing is restored and a checksum-verified portable `pg_dump` is retained locally.
+
+Hardening evidence on 2026-09-15: 616 unit tests, 82 real PostgreSQL tests, 45 Chromium journeys, production build, API typecheck, frontend bundle budgets, and the production dependency audit passed. Independent accounting and operations reviews closed the transaction-boundary, legacy-upgrade, exact-projection, first-cutoff, and worker-supervision findings. Railway Hobby is active, the public API is healthy, and a portable production dump was checksum-verified; deployment remains blocked only by the attached Postgres volume being 426 MB of 500 MB. No production migration was attempted.

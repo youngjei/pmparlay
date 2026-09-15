@@ -7,6 +7,7 @@ import {
   INTERNAL_FOUNDER_LP_USER_ID,
   admitNextLpVaultRedemption,
   appendLpVaultAccountingEvent,
+  closeDueLpVaultAccountingForReconciliation,
   closeLpVaultAccountingCycle,
   inceptLpVaultAccounting,
   loadLatestVerifiedLpVaultAccounting,
@@ -29,9 +30,12 @@ const treasury="0x1d4fd58d9fc24c9f3c8da0deb4a05e7d122ef17b";
 const token="0x1c7d4b196cb0c7b01d743fbc6116a902379c7238";
 const blockHash=`0x${"a".repeat(64)}`;
 
-async function applyMigrations(client:pg.Client){
+async function applyMigrations(client:pg.Client,through?:string){
   const migrations=(await readdir(migrationsDirectory)).filter(name=>name.endsWith(".sql")).sort();
-  for(const migration of migrations) await client.query(await readFile(path.join(migrationsDirectory,migration),"utf8"));
+  for(const migration of migrations){
+    if(through&&migration>through) break;
+    await client.query(await readFile(path.join(migrationsDirectory,migration),"utf8"));
+  }
 }
 
 function utcCutoff(offsetDays=0){
@@ -46,13 +50,18 @@ async function seedVault(client:pg.Client){
   [FOUNDER_SEPOLIA_SHADOW_VAULT_ID,treasury,token]);
 }
 
+async function expireFirstCutoffBootstrapWindow(client:Pick<pg.Client|pg.PoolClient,"query">){
+  await client.query("UPDATE financial_book_state SET created_at=now()-interval '2 days' WHERE scope='global'");
+}
+
 async function seedReconciliation(
   client:Pick<pg.Client|pg.PoolClient,"query">,
   createdAt:Date,
   assets=100_000_000n,
   options:{source?:"worker"|"legacy";launchGate?:"ready"|"blocked";
     operationGate?:"open"|"restricted"|"blocked";scopeTreasury?:string;scopeToken?:string;
-    metrics?:Record<string,string>;chainEvidenceAt?:Date;openStakeMicroUnits?:bigint;openReserveMicroUnits?:bigint}={}
+    metrics?:Record<string,string>;chainEvidenceAt?:Date;openStakeMicroUnits?:bigint;openReserveMicroUnits?:bigint;
+    financialStateHash?:string}={}
 ){
   const source=options.source??"worker";
   const scopeTreasury=options.scopeTreasury??treasury;
@@ -63,13 +72,16 @@ async function seedReconciliation(
     user_claimable_micro_units,user_checkout_micro_units,open_stake_micro_units,open_reserve_micro_units,
     pending_withdrawal_micro_units,house_equity_micro_units,unexplained_delta_micro_units,launch_gate,operation_gate,
     gate_reasons,treasury_assets,metrics,observed_block_number,observed_block_hash,source,scope_treasury_address,
-    scope_token_address,created_at) VALUES (11155111,'USDC',$1,$1,0,0,0,$11,$12,0,$1,0,$7,$8,'[]',$5::jsonb,$9::jsonb,
-    123,$2,$10,$3,$4,$6) RETURNING id`,[assets.toString(),blockHash,scopeTreasury,scopeToken,JSON.stringify([{
+    scope_token_address,created_at,financial_book_version,financial_state_hash)
+    VALUES (11155111,'USDC',$1,$1,0,0,0,$11,$12,0,$1,0,$7,$8,'[]',$5::jsonb,$9::jsonb,
+    123,$2,$10,$3,$4,$6,(SELECT book_version FROM financial_book_state WHERE scope='global'),$13)
+    RETURNING id`,[assets.toString(),blockHash,scopeTreasury,scopeToken,JSON.stringify([{
       source:"onchain",chainId:"11155111",treasuryAddress:scopeTreasury,tokenAddress:scopeToken,blockNumber:"123",blockHash,
       blockTimestamp:Math.floor(chainEvidenceAt.getTime()/1000).toString()
     }]),createdAt,options.launchGate??"ready",options.operationGate??"open",JSON.stringify({
       ...(options.metrics??{}),observedBlockTimestamp:Math.floor(chainEvidenceAt.getTime()/1000).toString()
-    }),source,(options.openStakeMicroUnits??0n).toString(),(options.openReserveMicroUnits??0n).toString()]);
+    }),source,(options.openStakeMicroUnits??0n).toString(),(options.openReserveMicroUnits??0n).toString(),
+    options.financialStateHash??`sha256:${"b".repeat(64)}`]);
   return result.rows[0].id;
 }
 
@@ -129,6 +141,39 @@ async function closeHistoricalCycle(
       ticketMarks:input.ticketMarks??[]
     });
   },pool);
+}
+
+async function closeTwoCyclesWithExpense(
+  pool:pg.Pool,
+  client:pg.Client,
+  eventAmountMicroUnits:string
+){
+  await seedVault(client);
+  const firstCutoff=utcCutoff(-1); const secondCutoff=utcCutoff();
+  const firstReconciliation=await seedReconciliation(client,new Date(firstCutoff.getTime()+60_000));
+  await runLpVaultAccountingTransaction(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,async accountingClient=>{
+    await inceptLpVaultAccounting(accountingClient,{vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+      reconciliationId:firstReconciliation});
+    const cycle=await openOrGetLpVaultCycle(accountingClient,{vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+      cutoffDate:firstCutoff.toISOString().slice(0,10)});
+    await closeLpVaultAccountingCycle(accountingClient,{vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,cycleId:cycle.id,
+      reconciliationId:firstReconciliation,sourceMaxAgeMs:300_000,ticketMarks:[]});
+  },pool);
+  await runLpVaultAccountingTransaction(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,async accountingClient=>{
+    const expenseId=randomUUID();
+    const event=await appendLpVaultAccountingEvent(accountingClient,{vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+      eventType:"expense_accrued",entityId:expenseId,payload:{
+        amountMicroUnits:eventAmountMicroUnits,approvalReference:"replay-expense"
+      }});
+    await accountingClient.query(`INSERT INTO lp_vault_approved_expense_accruals (
+      id,vault_id,amount_micro_units,accrued_on,approval_reference,evidence,accounting_event_id
+    ) VALUES ($1,$2,31,$3::date,'replay-expense',$4::jsonb,$5)`,[
+      expenseId,FOUNDER_SEPOLIA_SHADOW_VAULT_ID,secondCutoff.toISOString().slice(0,10),
+      JSON.stringify({source:"postgres-replay-test"}),event.id
+    ]);
+  },pool);
+  const secondReconciliation=await seedReconciliation(client,new Date(secondCutoff.getTime()+60_000));
+  await closeHistoricalCycle(pool,{cutoff:secondCutoff,reconciliationId:secondReconciliation});
 }
 
 async function assertExactCycleConservation(pool:pg.Pool,expectedCycles:number){
@@ -303,6 +348,262 @@ async function withSchema(context:TestContext,run:(pool:pg.Pool,client:pg.Client
 }
 
 postgresDescribe("rolling LP vault accounting repository",()=>{
+  it("upgrades a non-empty append-only reconciliation database from 0048",async context=>{
+    if(!testDatabaseUrl){context.skip();return;}
+    const admin=new pg.Client({connectionString:testDatabaseUrl}); await admin.connect();
+    const schema=`lp_upgrade_${randomUUID().replaceAll("-","")}`;
+    try{
+      await admin.query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public");
+      await admin.query("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public");
+      await admin.query(`CREATE SCHEMA ${schema}`); await admin.query(`SET search_path TO ${schema},public`);
+      await applyMigrations(admin,"0048_lp_vault_rolling_accounting.sql");
+      const legacyId=randomUUID();
+      await admin.query(`INSERT INTO financial_reconciliation_snapshots (
+        id,chain_id,currency,treasury_assets_micro_units,internal_custody_micro_units,user_available_micro_units,
+        user_claimable_micro_units,user_checkout_micro_units,open_stake_micro_units,open_reserve_micro_units,
+        pending_withdrawal_micro_units,house_equity_micro_units,unexplained_delta_micro_units,launch_gate,operation_gate,
+        gate_reasons,treasury_assets,metrics,observed_block_number,observed_block_hash,source,scope_treasury_address,
+        scope_token_address)
+        VALUES ($1,11155111,'USDC',100000000,100000000,0,0,0,0,0,0,100000000,0,'ready','open','[]',$2::jsonb,
+          $3::jsonb,123,$4,'worker',$5,$6)`,[legacyId,JSON.stringify([{
+          source:"onchain",chainId:"11155111",treasuryAddress:treasury,tokenAddress:token,
+          blockNumber:"123",blockHash,balanceMicroUnits:"100000000"
+        }]),JSON.stringify({observedBlockTimestamp:"1"}),blockHash,treasury,token]);
+      await seedVault(admin);
+      const userId=randomUUID();
+      const positionId=randomUUID();
+      const requestId=randomUUID();
+      const waitingId=randomUUID();
+      await admin.query("INSERT INTO users (id,email) VALUES ($1,$2)",[userId,`${userId}@example.test`]);
+      await admin.query("INSERT INTO lp_vault_share_positions (id,vault_id,user_id) VALUES ($1,$2,$3)",
+        [positionId,FOUNDER_SEPOLIA_SHADOW_VAULT_ID,userId]);
+      const requestedEvent=await appendLpVaultAccountingEvent(admin,{
+        vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+        eventType:"redemption_requested",
+        entityId:requestId,
+        payload:{userId,requestedShareUnits:"1000000000000000000"}
+      });
+      await admin.query(`INSERT INTO lp_vault_redemption_requests (
+        id,vault_id,position_id,requested_share_units,request_payload_hash,status,accounting_event_id
+      ) VALUES ($1,$2,$3,1000000000000000000,$4,'queued',$5)`,[
+        requestId,FOUNDER_SEPOLIA_SHADOW_VAULT_ID,positionId,`sha256:${"a".repeat(64)}`,requestedEvent.id
+      ]);
+      const waitingEvent=await appendLpVaultAccountingEvent(admin,{
+        vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+        eventType:"redemption_waiting",
+        entityId:waitingId,
+        payload:{
+          requestId,
+          reconciliationSnapshotId:legacyId,
+          requiredLiquidityMicroUnits:"1000000",
+          availableLiquidityBeforeMicroUnits:"500000"
+        }
+      });
+      await admin.query("UPDATE lp_vault_redemption_requests SET status='waiting_liquidity' WHERE id=$1",[requestId]);
+      await admin.query(await readFile(path.join(migrationsDirectory,"0049_lp_vault_accounting_hardening.sql"),"utf8"));
+      const upgraded=await admin.query<{financial_book_version:string;financial_state_hash:string|null}>(
+        `SELECT financial_book_version::text,financial_state_hash FROM financial_reconciliation_snapshots WHERE id=$1`,[legacyId]
+      );
+      expect(upgraded.rows[0]).toEqual({financial_book_version:"0",financial_state_hash:null});
+      const waitingEvidence=await admin.query<{request_id:string;reconciliation_id:string;required:string;available:string}>(
+        `SELECT redemption_request_id::text AS request_id,
+          source_reconciliation_snapshot_id::text AS reconciliation_id,
+          required_liquidity_micro_units::text AS required,
+          available_liquidity_before_micro_units::text AS available
+         FROM lp_vault_redemption_waiting_evidence WHERE accounting_event_id=$1`,[waitingEvent.id]
+      );
+      expect(waitingEvidence.rows[0]).toEqual({
+        request_id:requestId,
+        reconciliation_id:legacyId,
+        required:"1000000",
+        available:"500000"
+      });
+    }finally{
+      await admin.query("SET search_path TO public");
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+    }
+  },30_000);
+
+  it("replays a canonical immutable expense projection",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await closeTwoCyclesWithExpense(pool,client,"31");
+      await expect(replayLpVaultAccounting(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,pool)).resolves.toMatchObject({
+        checkpointCount:2,economicNavMicroUnits:99_999_969n
+      });
+    });
+  },20_000);
+
+  it("rejects an expense event whose payload amount differs from immutable expense evidence",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await closeTwoCyclesWithExpense(pool,client,"30");
+      await expect(replayLpVaultAccounting(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,pool))
+        .rejects.toThrow("lp_vault_accounting_direct_projection_mismatch");
+    });
+  },20_000);
+
+  it("advances the financial book only for committed source mutations",async context=>{
+    await withSchema(context,async(_pool,client)=>{
+      const accountId=randomUUID();
+      await client.query(`INSERT INTO ledger_accounts (id,account_type,currency)
+        VALUES ($1,'house_usdc_operating','USDC')`,[accountId]);
+      const initial=await client.query<{book_version:string}>(
+        "SELECT book_version::text FROM financial_book_state WHERE scope='global'"
+      );
+      await client.query("BEGIN");
+      await client.query(`INSERT INTO ledger_entries (transaction_id,account_id,amount_micro_units,currency,memo)
+        VALUES ($1,$2,1,'USDC','book version commit'),($1,$2,-1,'USDC','book version commit')`,
+      [randomUUID(),accountId]);
+      await client.query("COMMIT");
+      const committed=await client.query<{book_version:string}>(
+        "SELECT book_version::text FROM financial_book_state WHERE scope='global'"
+      );
+      expect(BigInt(committed.rows[0].book_version)).toBe(BigInt(initial.rows[0].book_version)+1n);
+
+      await client.query("BEGIN");
+      await client.query(`INSERT INTO ledger_entries (transaction_id,account_id,amount_micro_units,currency,memo)
+        VALUES ($1,$2,1,'USDC','book version rollback'),($1,$2,-1,'USDC','book version rollback')`,
+      [randomUUID(),accountId]);
+      await client.query("ROLLBACK");
+      const rolledBack=await client.query<{book_version:string}>(
+        "SELECT book_version::text FROM financial_book_state WHERE scope='global'"
+      );
+      expect(rolledBack.rows[0].book_version).toBe(committed.rows[0].book_version);
+    });
+  },15_000);
+
+  it("reports a healthy waiting state before a new installation's first UTC cutoff",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      const result=await runDueLpVaultAccountingCycle({queryable:pool});
+      expect(result).toMatchObject({
+        status:"waiting_first_cutoff",
+        vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,
+        cutoffDate:utcCutoff(1).toISOString().slice(0,10)
+      });
+    });
+  },15_000);
+
+  it("rejects a close when financial state changed after reconciliation",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      const cutoff=utcCutoff();
+      const reconciliationId=await seedReconciliation(client,new Date(cutoff.getTime()+60_000));
+      const accountId=randomUUID();
+      await client.query(`INSERT INTO ledger_accounts (id,account_type,currency)
+        VALUES ($1,'house_usdc_operating','USDC')`,[accountId]);
+      await client.query(`INSERT INTO ledger_entries (transaction_id,account_id,amount_micro_units,currency,memo)
+        VALUES ($1,$2,1,'USDC','stale close'),($1,$2,-1,'USDC','stale close')`,[randomUUID(),accountId]);
+      await expect(runLpVaultAccountingTransaction(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,async accountingClient=>{
+        const cycle=await openOrGetLpVaultCycle(accountingClient,{
+          vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,cutoffDate:cutoff.toISOString().slice(0,10)
+        });
+        return await closeLpVaultAccountingCycle(accountingClient,{
+          vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,cycleId:cycle.id,reconciliationId,
+          sourceMaxAgeMs:300_000,ticketMarks:[]
+        });
+      },pool)).rejects.toThrow("lp_vault_reconciliation_book_version_stale");
+      const cycles=await pool.query<{count:string}>("SELECT count(*)::text AS count FROM lp_vault_daily_cycles");
+      expect(cycles.rows[0].count).toBe("0");
+    });
+  },15_000);
+
+  it("closes from the reconciliation transaction before later financial activity",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      const cutoff=utcCutoff();
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await lockFinancialControlGateForMutation(client as unknown as pg.PoolClient);
+      await client.query("SELECT set_config('legwork.financial_global_exclusive_lock', 'held', true)");
+      const reconciliationId=await seedReconciliation(client,new Date(cutoff.getTime()+60_000));
+      const result=await closeDueLpVaultAccountingForReconciliation(client as unknown as pg.PoolClient,reconciliationId);
+      await client.query("COMMIT");
+      expect(result?.status).toBe("created");
+      if(result?.status!=="created") throw new Error("expected_created_cycle");
+
+      const accountId=randomUUID();
+      await client.query(`INSERT INTO ledger_accounts (id,account_type,currency)
+        VALUES ($1,'house_usdc_operating','USDC')`,[accountId]);
+      await client.query(`INSERT INTO ledger_entries (transaction_id,account_id,amount_micro_units,currency,memo)
+        VALUES ($1,$2,1,'USDC','post-close activity'),($1,$2,-1,'USDC','post-close activity')`,[randomUUID(),accountId]);
+      const cycle=await pool.query<{status:string}>(`SELECT status FROM lp_vault_daily_cycles WHERE id=$1`,[result!.cycleId]);
+      expect(cycle.rows[0].status).toBe("closed");
+    });
+  },15_000);
+
+  it("recovers a missed cutoff only from unchanged bracketing financial evidence",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      const cutoff=utcCutoff();
+      const beforeId=await seedReconciliation(client,new Date(cutoff.getTime()-60_000));
+      await seedReconciliation(client,new Date(cutoff.getTime()+10*60_000));
+      const result=await runDueLpVaultAccountingCycle({queryable:pool});
+      expect(result.status).toBe("created");
+      if(result.status!=="created") throw new Error("expected_created_cycle");
+      const cycle=await pool.query<{close_mode:string;source_delay_ms:string;recovery_before_snapshot_id:string}>(
+        `SELECT close_mode,source_delay_ms::text,recovery_before_snapshot_id::text
+         FROM lp_vault_daily_cycles WHERE id=$1`,[result.cycleId]
+      );
+      expect(cycle.rows[0]).toEqual({
+        close_mode:"unchanged_state_recovery",
+        source_delay_ms:String(10*60_000),
+        recovery_before_snapshot_id:beforeId
+      });
+    });
+  },15_000);
+
+  it("recovers a missed cutoff while conservatively marking an unresolved ticket",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      const cutoff=utcCutoff();
+      const priorCutoff=utcCutoff(-1);
+      const inceptionReconciliationId=await seedReconciliation(client,new Date(priorCutoff.getTime()+60_000));
+      await runLpVaultAccountingTransaction(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,async accountingClient=>{
+        await inceptLpVaultAccounting(accountingClient,{
+          vaultId:FOUNDER_SEPOLIA_SHADOW_VAULT_ID,reconciliationId:inceptionReconciliationId
+        });
+      },pool);
+      await closeHistoricalCycle(pool,{cutoff:priorCutoff,reconciliationId:inceptionReconciliationId});
+
+      const ticket=await seedHouseBookTicketReserve(client,new Date(cutoff.getTime()-120_000));
+      await seedReconciliation(client,new Date(cutoff.getTime()-60_000),100_000_000n,{
+        openStakeMicroUnits:1_000_000n,openReserveMicroUnits:2_000_000n
+      });
+      await seedReconciliation(client,new Date(cutoff.getTime()+10*60_000),100_000_000n,{
+        openStakeMicroUnits:1_000_000n,openReserveMicroUnits:2_000_000n
+      });
+      const result=await runDueLpVaultAccountingCycle({queryable:pool});
+      expect(result.status).toBe("created");
+      if(result.status!=="created") throw new Error("expected_created_cycle");
+      const marks=await pool.query<{ticket_id:string;marked:string;evidence_time:Date}>(
+        `SELECT ticket_id,marked_liability_micro_units::text AS marked,evidence_time
+         FROM lp_vault_ticket_liability_marks WHERE cycle_id=$1`,[result.cycleId]
+      );
+      expect(marks.rows).toHaveLength(1);
+      expect(marks.rows[0].ticket_id).toBe(ticket.ticket);
+      expect(marks.rows[0].marked).toBe("2000000");
+      expect(marks.rows[0].evidence_time.getTime()).toBe(cutoff.getTime()+10*60_000);
+    });
+  },20_000);
+
+  it("fails closed when missed-cutoff bracketing state hashes differ",async context=>{
+    await withSchema(context,async(pool,client)=>{
+      await seedVault(client);
+      await expireFirstCutoffBootstrapWindow(client);
+      const cutoff=utcCutoff();
+      await seedReconciliation(client,new Date(cutoff.getTime()-60_000),100_000_000n,{
+        financialStateHash:`sha256:${"b".repeat(64)}`
+      });
+      await seedReconciliation(client,new Date(cutoff.getTime()+10*60_000),100_000_000n,{
+        financialStateHash:`sha256:${"c".repeat(64)}`
+      });
+      await expect(runDueLpVaultAccountingCycle({queryable:pool}))
+        .rejects.toThrow("lp_vault_due_cycle_source_unavailable");
+      const cycles=await pool.query<{count:string}>("SELECT count(*)::text AS count FROM lp_vault_daily_cycles");
+      expect(cycles.rows[0].count).toBe("0");
+    });
+  },15_000);
+
   it("closes founder genesis once under concurrency and replays exact closing state",async context=>{
     await withSchema(context,async(pool,client)=>{
       await seedVault(client);
@@ -310,10 +611,12 @@ postgresDescribe("rolling LP vault accounting repository",()=>{
       const results=await Promise.all(Array.from({length:12},()=>runDueLpVaultAccountingCycle({queryable:pool})));
       expect(results.filter(result=>result.status==="created")).toHaveLength(1);
       expect(results.filter(result=>result.status==="already_closed")).toHaveLength(11);
+      const created=results.find(result=>result.status==="created");
+      if(!created||created.status!=="created") throw new Error("expected_created_cycle");
       const accounting=await loadLatestVerifiedLpVaultAccounting(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,pool);
       expect(accounting?.economicNavMicroUnits).toBe(100_000_000n);
       expect(accounting?.activeShareUnits).toBe(100_000_000_000_000_000_000n);
-      expect(accounting?.bookVersion).toBe(BigInt(results.find(result=>result.status==="created")!.bookVersion));
+      expect(accounting?.bookVersion).toBe(BigInt(created.bookVersion));
       const replay=await replayLpVaultAccounting(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,pool);
       expect(replay.replayedShareSupplyUnits).toBe(accounting?.activeShareUnits);
       expect(replay.economicNavMicroUnits).toBe(100_000_000n);
@@ -375,6 +678,7 @@ postgresDescribe("rolling LP vault accounting repository",()=>{
   it("rejects a reconciliation outside the UTC cutoff evidence window",async context=>{
     await withSchema(context,async(pool,client)=>{
       await seedVault(client); await seedReconciliation(client,new Date(utcCutoff().getTime()+5*60_000+1));
+      await expireFirstCutoffBootstrapWindow(client);
       await expect(runDueLpVaultAccountingCycle({queryable:pool})).rejects.toThrow("lp_vault_due_cycle_source_unavailable");
     });
   });
@@ -382,6 +686,7 @@ postgresDescribe("rolling LP vault accounting repository",()=>{
   it("rejects fresh processing whose canonical block predates the UTC cutoff",async context=>{
     await withSchema(context,async(pool,client)=>{
       await seedVault(client);
+      await expireFirstCutoffBootstrapWindow(client);
       const cutoff=utcCutoff();
       await seedReconciliation(client,new Date(cutoff.getTime()+60_000),100_000_000n,{
         chainEvidenceAt:new Date(cutoff.getTime()-1_000)
@@ -393,6 +698,7 @@ postgresDescribe("rolling LP vault accounting repository",()=>{
   it("rejects reconciliation processing that predates its claimed canonical block",async context=>{
     await withSchema(context,async(pool,client)=>{
       await seedVault(client);
+      await expireFirstCutoffBootstrapWindow(client);
       const cutoff=utcCutoff();
       const reconciliationId=await seedReconciliation(client,new Date(cutoff.getTime()+60_000),100_000_000n,{
         chainEvidenceAt:new Date(cutoff.getTime()+120_000)
@@ -728,6 +1034,9 @@ postgresDescribe("rolling LP vault accounting repository",()=>{
         (SELECT status FROM lp_vault_redemption_requests WHERE id=$2) AS second_status`,
       [FOUNDER_SEPOLIA_SHADOW_VAULT_ID,second.id]);
       expect(evidence.rows[0]).toEqual({reserves:"1",second_status:"waiting_liquidity"});
+      await expect(replayLpVaultAccounting(FOUNDER_SEPOLIA_SHADOW_VAULT_ID,pool)).resolves.toMatchObject({
+        checkpointCount:2
+      });
     });
   });
 

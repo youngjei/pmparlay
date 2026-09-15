@@ -124,6 +124,7 @@ describe("trusted reconciliation snapshot scope", () => {
     const events: string[] = [];
     db.clientQuery.mockImplementation(async (sql: string) => {
       const text = String(sql);
+      if (text.includes("FROM financial_book_state")) return { rows: [{ book_version: "7" }] };
       if (text.includes("FROM treasury_config")) {
         return {
           rows: [
@@ -227,5 +228,7 @@ describe("trusted reconciliation snapshot scope", () => {
       observedBlockTimestamp: "1767225600",
       treasuryAssetCount: "1"
     }));
+    expect(insertParams[22]).toBe("7");
+    expect(insertParams[23]).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 });

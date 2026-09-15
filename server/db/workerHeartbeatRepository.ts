@@ -2,8 +2,13 @@ import type pg from "pg";
 import { randomUUID } from "node:crypto";
 import { getPool } from "./client";
 
-export const REQUIRED_FINANCIAL_WORKERS = ["usdc-deposit-scanner", "financial-reconciliation", "settlement-worker"] as const;
-export const REQUIRED_RUNTIME_WORKERS = ["market-worker", ...REQUIRED_FINANCIAL_WORKERS] as const;
+export const REQUIRED_FINANCIAL_WORKERS = [
+  "usdc-deposit-scanner",
+  "financial-reconciliation",
+  "settlement-worker",
+  "lp-vault-accounting"
+] as const;
+export const REQUIRED_RUNTIME_WORKERS = ["market-worker", "outbox-worker", ...REQUIRED_FINANCIAL_WORKERS] as const;
 
 const MAX_FAILURE_MESSAGE_LENGTH = 512;
 const WORKER_INSTANCE_ID = randomUUID();

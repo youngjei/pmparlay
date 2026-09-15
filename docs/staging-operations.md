@@ -49,13 +49,15 @@ npm run staging:web
 
 `staging:provision` is idempotent and applies the complete migration and settlement-identity backfill chain. For a reset, use only `npm run staging:reset`: it requires stopped services, creates and checksum-validates a backup, restores it into a disposable database, fingerprints every public table, and binds a mode-`0600` restore attestation to the exact archive digest before the provisioner may drop state. A direct `staging:provision -- --reset` without that attestation fails closed. The reset also requires `STAGING_RESET_CONFIRM` to equal the exact staging database name. Both commands generate `.context/sepolia-staging.env` with mode `0600`, preserve its generated ops key and deposit scan start across idempotent runs, verify the payment RPC is Sepolia, and pin Circle Sepolia USDC plus the approved Safe owner. Treat any nonzero backfill or preflight exit as a startup blocker.
 
-`staging:run` owns the API and required market, deposit, reconciliation, and settlement workers as one foreground process group. Run `staging:web` in a second terminal; it exposes only public Privy, chain, and token values to Vite and proxies `/api` to staging port `8790`. Both launchers use sanitized environments that ambient database or API variables cannot redirect. For isolated manual debugging, use only the staging wrappers:
+`staging:run` owns the API and all required market, outbox, deposit, reconciliation, settlement, and LP accounting workers as one foreground process group. Run `staging:web` in a second terminal; it exposes only public Privy, chain, and token values to Vite and proxies `/api` to staging port `8790`. Both launchers use sanitized environments that ambient database or API variables cannot redirect. For isolated manual debugging, use only the staging wrappers:
 
 ```bash
 npm run staging:worker:markets
+npm run staging:worker:outbox
 npm run staging:worker:deposits
 npm run staging:worker:reconciliation
 npm run staging:worker:settlements
+npm run staging:worker:lp-vault-accounting
 ```
 
 The market worker is required whenever users browse markets. It advances a durable Polymarket cursor in one-page jobs, refreshes already-known markets, admits newly eligible markets, and keeps every quote- or ticket-referenced snapshot while pruning older unreferenced snapshots. The one-page limit avoids long database transactions. Sweep duration depends on Polymarket's active catalog size and can take hours at the default one-minute cadence; monitor `market_catalog_sweep_state` instead of assuming a fixed page count. The last completed-sweep timestamp remains available while the next generation is in progress. Start `npm run start:worker:outbox` only when its queue is in use. `npm run dev:local` starts the frontend, API, market, deposit, reconciliation, and settlement processes as a development convenience, but it is not a supervised staging procedure.

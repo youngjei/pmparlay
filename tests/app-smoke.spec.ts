@@ -428,6 +428,7 @@ test.beforeEach(async ({ page }) => {
 
 test("LP Vault deep-link shows fresh collateral evidence and preserves browser navigation", async ({ page }) => {
   await page.goto("/");
+  const appOrigin = new URL(page.url()).origin;
   const nav = page.getByRole("navigation", { name: "Primary" });
   await expect(nav.getByRole("button")).toHaveCount(3);
 
@@ -490,7 +491,7 @@ test("LP Vault deep-link shows fresh collateral evidence and preserves browser n
   expect(freshViewport.scrollWidth).toBeLessThanOrEqual(freshViewport.width);
 
   await page.goBack();
-  await expect(page).toHaveURL("http://localhost:5174/");
+  await expect(page).toHaveURL(`${appOrigin}/`);
   await expect(page.getByRole("heading", { name: "Discover" })).toBeVisible();
   await page.goForward();
   await expect(page).toHaveURL(/#lp-vault$/);

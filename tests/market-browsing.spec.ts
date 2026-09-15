@@ -497,7 +497,7 @@ test("multi-market events collapse after a pick and permit replacement after reo
   await teamOne.getByRole("button", { name: /Yes\s+20¢/ }).click();
   await expect(page.locator(".leg-list .leg-row")).toHaveCount(1);
   await expect(page.locator(".leg-list")).toContainText("Yes at 20¢");
-  await expect(event.locator(".event-selected-summary")).toContainText("Will Team 1 win the 2026 FIFA World Cup? · Yes · 20¢");
+  await expect(event.locator(".event-selected-summary")).toContainText("Pick added · Yes 20¢ · Will Team 1 win the 2026 FIFA World Cup?");
 
   await event.getByRole("button", { name: /Expand 2026 FIFA World Cup Winner/ }).click();
   await expect(teamTwo).toBeVisible();
@@ -505,7 +505,7 @@ test("multi-market events collapse after a pick and permit replacement after reo
   await expect(page.locator(".leg-list .leg-row")).toHaveCount(1);
   await expect(page.locator(".leg-list")).toContainText("No at 79¢");
   await expect(page.locator(".leg-list")).not.toContainText("Yes at 20¢");
-  await expect(page.locator(".selection-toast")).toContainText("Replaced");
+  await expect(page.locator(".selection-toast")).toContainText("Pick changed");
   await expect(event.locator(".event-sibling-row")).toHaveCount(0);
 });
 
@@ -574,17 +574,17 @@ test("payment review is a modal dialog that traps focus and restores checkout fo
   });
 
   await page.goto("/");
-  await page.getByLabel("Buy amount").fill("5");
+  await page.getByLabel("Your stake").fill("5");
   await page.locator(".market-card").filter({ hasText: "payment-review market 1" }).getByRole("button", { name: /Yes/ }).click();
   await page.locator(".market-card").filter({ hasText: "payment-review market 2" }).getByRole("button", { name: /Yes/ }).click();
 
-  const checkout = page.locator(".ticket-pane").getByRole("button", { name: "Review basket" });
+  const checkout = page.locator(".ticket-pane").getByRole("button", { name: "Review combo" });
   await checkout.focus();
   await checkout.click();
 
-  const dialog = page.getByRole("dialog", { name: "Buy this basket" });
+  const dialog = page.getByRole("dialog", { name: "Review your combo" });
   const close = dialog.getByRole("button", { name: "Close payment review" });
-  const send = dialog.getByRole("button", { name: "Send USDC" });
+  const send = dialog.getByRole("button", { name: /Pay .* test USDC/ });
   await expect(dialog).toHaveAttribute("aria-modal", "true");
   await expect(close).toBeFocused();
   await expect(page.locator(".app-background")).toHaveAttribute("inert", "");
@@ -639,7 +639,7 @@ test("mobile event expansion shows five siblings and basket sheet remains sticky
   await expect(page.locator(".mobile-basket-bar")).toBeVisible();
 
   await page.locator(".mobile-basket-bar").click();
-  await expect(page.getByRole("dialog", { name: "Basket" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Your combo" })).toBeVisible();
   await expect(page.locator(".mobile-leg-list .leg-row")).toHaveCount(2);
 });
 
@@ -652,8 +652,8 @@ test("mobile basket traps focus, closes on Escape, and restores its trigger", as
   await trigger.focus();
   await trigger.click();
 
-  const dialog = page.getByRole("dialog", { name: "Basket" });
-  const close = dialog.getByRole("button", { name: "Collapse basket" });
+  const dialog = page.getByRole("dialog", { name: "Your combo" });
+  const close = dialog.getByRole("button", { name: "Collapse combo" });
   await expect(dialog).toHaveAttribute("aria-modal", "true");
   await expect(close).toBeFocused();
   await expect(page.locator(".app-background")).toHaveAttribute("inert", "");

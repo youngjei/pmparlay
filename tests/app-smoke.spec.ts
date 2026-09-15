@@ -633,11 +633,11 @@ test("market basket controls work", async ({ page }) => {
   await expect(page.locator(".brand-lockup")).toContainText("LEGWORK");
   await expect(page.getByRole("heading", { name: "Discover" })).toBeVisible();
   await expect(page.getByText("Indicative price")).toHaveCount(0);
-  await expect(page.getByLabel("Quote summary")).toContainText("Basket price");
+  await expect(page.getByLabel("Combo summary")).toContainText("Choose your first pick");
   await expect(page.getByLabel("Search markets")).toBeVisible();
   await expect(page.getByLabel("Sort markets")).toBeVisible();
   await expect(page.getByRole("group", { name: "Category filters" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Choose 2 picks" })).toBeDisabled();
   await expect(page.getByText("already-decided")).toHaveCount(0);
   await expect(page.getByText("expired market")).toHaveCount(0);
 
@@ -654,24 +654,28 @@ test("market basket controls work", async ({ page }) => {
   );
   await expect(page.getByText("Demo only")).toHaveCount(0);
   await firstMarket.getByRole("button", { name: /Up\s+53¢/ }).click();
-  await expect(page.getByText("Select 2+ markets to price a basket")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
-  await expect(page.getByLabel("Quote summary")).toContainText("Potential payout—");
-  await expect(page.getByText("Add one more market to unlock a basket quote.")).toBeVisible();
-  await expect(page.getByText("Basket availability")).toHaveCount(0);
+  await expect(page.getByText("Choose at least two outcomes to unlock your combo payout.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add 1 more pick" })).toBeDisabled();
+  await expect(page.getByLabel("Combo summary")).toContainText("Add one more pick");
+  await expect(page.getByText("Add one more pick to unlock your combo payout.")).toBeVisible();
+  await expect(page.getByText("Combo availability")).toHaveCount(0);
 
   await page.getByLabel("Set max stake").click();
   const secondMarket = page.locator(".market-card").nth(1);
   await secondMarket.getByRole("button", { name: /Up\s+49¢/ }).click();
   await expect(page.locator(".payout-callout .firework-burst")).toBeAttached();
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeEnabled();
-  await page.getByRole("button", { name: "Review basket" }).click();
-  const paymentDialog = page.getByRole("dialog", { name: "Buy this basket" });
+  await expect(page.getByRole("button", { name: "Review combo" })).toBeEnabled();
+  await page.getByRole("button", { name: "Review combo" }).click();
+  const paymentDialog = page.getByRole("dialog", { name: "Review your combo" });
   await expect(paymentDialog).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send USDC" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /Pay .* test USDC/ })).toBeDisabled();
   await expect(paymentDialog.locator(".payment-hero")).toContainText("$6.00");
-  for (const value of ["$36", "13¢", "10.0%", "7.20x", "$1.00"]) {
+  for (const value of ["$36", "All 2 picks must win"]) {
     await expect(paymentDialog.locator(".payment-grid")).toContainText(value);
+  }
+  await expect(paymentDialog.locator(".payment-hero")).toContainText("$5.00 stake + $1.00 fees");
+  for (const value of ["12.5%", "10.0%", "7.20x"]) {
+    await expect(paymentDialog.locator(".payment-price-details")).toContainText(value);
   }
   for (const value of ["Up · 55¢", "Refreshed Bitcoin execution", "Up · 48¢", "Refreshed Ethereum execution"]) {
     await expect(paymentDialog.locator(".payment-leg-list")).toContainText(value);
@@ -681,19 +685,19 @@ test("market basket controls work", async ({ page }) => {
   await page.getByLabel("Close payment review").click();
 
   await secondMarket.getByRole("button", { name: /Down\s+51¢/ }).click();
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Review combo" })).toBeEnabled();
 
-  await page.getByLabel("Buy amount").fill("0");
-  await page.getByLabel("Buy amount").blur();
+  await page.getByLabel("Your stake").fill("0");
+  await page.getByLabel("Your stake").blur();
   await page.getByLabel("Add $2").click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("2");
+  await expect(page.getByLabel("Your stake")).toHaveValue("2");
   await page.getByLabel("Add $5").click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
+  await expect(page.getByLabel("Your stake")).toHaveValue("5");
   await page.getByLabel("Add $1").click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
-  await page.getByLabel("Buy amount").fill("999");
-  await page.getByLabel("Buy amount").blur();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
+  await expect(page.getByLabel("Your stake")).toHaveValue("5");
+  await page.getByLabel("Your stake").fill("999");
+  await page.getByLabel("Your stake").blur();
+  await expect(page.getByLabel("Your stake")).toHaveValue("5");
 
   await page.getByLabel("Search markets").fill("Argentina");
   await expect(page.locator(".market-card").first()).toContainText(/Argentina/i);
@@ -703,8 +707,8 @@ test("market basket controls work", async ({ page }) => {
   if ((await sportsChip.count()) > 0) await sportsChip.click();
 
   await page.getByRole("button", { name: "Clear" }).click();
-  await expect(page.getByText("Select 2+ markets to price a basket")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
+  await expect(page.getByText("Choose at least two outcomes to unlock your combo payout.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Choose 2 picks" })).toBeDisabled();
 });
 
 test("incomplete basket states never imply a payout or fee before buy amount", async ({ page }) => {
@@ -713,11 +717,11 @@ test("incomplete basket states never imply a payout or fee before buy amount", a
   await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
 
-  await expect(page.locator(".payout-callout")).toContainText("Enter buy amount to see payout.");
+  await expect(page.locator(".payout-callout")).toContainText("Set your stake to see what you could win.");
   await expect(page.locator(".payout-callout .payout-value")).toHaveText("—");
-  await expect(page.getByLabel("Quote summary")).toContainText("Amount due$0.00");
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
-  await expect(page.getByText("Basket unavailable")).toHaveCount(0);
+  await expect(page.getByLabel("Combo summary")).toContainText("Set your stake");
+  await expect(page.getByRole("button", { name: "Set your stake" })).toBeDisabled();
+  await expect(page.getByText("Combo unavailable")).toHaveCount(0);
   await expect(page.getByText("Unavailable", { exact: true })).toHaveCount(0);
 });
 
@@ -731,30 +735,30 @@ test("failed quote preparation hides estimates and offers a real retry", async (
   await page.getByLabel("Search markets").fill("Up or Down");
   await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
-  await page.getByRole("button", { name: "Review basket" }).click();
+  await page.getByRole("button", { name: "Review combo" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Buy this basket" });
+  const dialog = page.getByRole("dialog", { name: "Review your combo" });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(".payment-hero")).toContainText("Unavailable");
   await expect(dialog.locator(".payment-grid")).toContainText("Unavailable");
   await expect(dialog.getByRole("button", { name: "Retry quote" })).toBeEnabled();
-  await expect(dialog.getByRole("button", { name: "Send USDC" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Pay .* test USDC/ })).toHaveCount(0);
 });
 
 test("mobile guidance progresses from zero picks through a priced basket", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 900 });
   await page.goto("/");
   const basketBar = page.locator(".mobile-basket-bar");
-  await expect(basketBar).toContainText("Add two markets");
+  await expect(basketBar).toContainText("Choose two picks");
 
   await page.getByLabel("Search markets").fill("Up or Down");
   await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await expect(basketBar).toContainText("Add one more");
   await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
-  await expect(basketBar).toContainText("Enter buy amount");
+  await expect(basketBar).toContainText("Set your stake");
   await basketBar.click();
-  await page.getByLabel("Mobile buy amount").fill("5");
-  await expect(page.locator(".mobile-basket-sheet .mobile-payout-value")).toContainText("potential");
+  await page.getByRole("spinbutton", { name: "Mobile stake" }).fill("5");
+  await expect(page.locator(".mobile-basket-sheet .mobile-payout-value")).toContainText("to win");
 });
 
 for (const width of [320, 390]) {
@@ -778,7 +782,7 @@ for (const width of [320, 390]) {
     expect(ctaBox).not.toBeNull();
     expect(ctaBox!.x + ctaBox!.width).toBeLessThanOrEqual(width);
     expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(ctaBox!.x - 8);
-    await expect(bar).toHaveAttribute("aria-label", /Open basket: 1 selected\./);
+    await expect(bar).toHaveAttribute("aria-label", /Open combo: 1 selected\./);
   });
 }
 
@@ -788,12 +792,12 @@ test("tablet and short desktop keep basket review controls in reach", async ({ p
   await expect(page.locator(".mobile-basket-bar")).toBeVisible();
   await expect(page.locator(".ticket-pane")).toBeHidden();
   await page.locator(".mobile-basket-bar").click();
-  const tabletBasket = page.getByRole("dialog", { name: "Basket" });
+  const tabletBasket = page.getByRole("dialog", { name: "Your combo" });
   await expect(tabletBasket).toBeVisible();
-  const tabletReviewBox = await tabletBasket.getByRole("button", { name: "Review basket" }).boundingBox();
+  const tabletReviewBox = await tabletBasket.getByRole("button", { name: "Choose 2 picks" }).boundingBox();
   expect(tabletReviewBox).not.toBeNull();
   expect(tabletReviewBox!.height).toBeLessThanOrEqual(60);
-  await page.getByLabel("Collapse basket").click();
+  await page.getByLabel("Collapse combo").click();
 
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByLabel("Search markets").fill("Up or Down");
@@ -802,7 +806,7 @@ test("tablet and short desktop keep basket review controls in reach", async ({ p
   await page.getByLabel("Set max stake").click();
 
   const payoutBox = await page.locator(".payout-callout").boundingBox();
-  const reviewBox = await page.locator(".ticket-pane").getByRole("button", { name: "Review basket" }).boundingBox();
+  const reviewBox = await page.locator(".ticket-pane").getByRole("button", { name: "Review combo" }).boundingBox();
   expect(payoutBox).not.toBeNull();
   expect(reviewBox).not.toBeNull();
   expect(payoutBox!.y + payoutBox!.height, "payout bottom").toBeLessThanOrEqual(720);
@@ -895,7 +899,7 @@ test("outcome buttons preserve Polymarket label-price-id mapping", async ({ page
     .getByRole("button", { name: /No\s+79¢/ })
     .click();
 
-  await page.getByRole("button", { name: "Review basket" }).click();
+  await page.getByRole("button", { name: "Review combo" }).click();
   expect(quoteBody).toEqual({
     stakeUsd: 5,
     legs: [{ id: "reverse-order-condition-Yes" }, { id: "newsom-nominee-condition-No" }]
@@ -915,14 +919,14 @@ test("mobile basket sheet shows and removes selected markets", async ({ page }) 
   await secondMarket.locator(".outcome-btn").first().click();
 
   await page.locator(".mobile-basket-bar").click();
-  await expect(page.getByRole("dialog", { name: "Basket" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Your combo" })).toBeVisible();
   await expect(page.locator(".mobile-leg-list .leg-row")).toHaveCount(2);
 
   await page.locator(".mobile-leg-list .leg-row").first().getByLabel("Remove leg").click();
   await expect(page.locator(".mobile-leg-list .leg-row")).toHaveCount(1);
 
-  await page.getByLabel("Collapse basket").last().click();
-  await expect(page.getByRole("dialog", { name: "Basket" })).toHaveCount(0);
+  await page.getByLabel("Collapse combo").last().click();
+  await expect(page.getByRole("dialog", { name: "Your combo" })).toHaveCount(0);
 });
 
 test("same event winner yes collapses the group and permits replacement", async ({ page }) => {
@@ -939,13 +943,13 @@ test("same event winner yes collapses the group and permits replacement", async 
   await event.getByRole("button", { name: /Expand/ }).click();
   await event.locator(".event-sibling-row").filter({ hasText: "Will Morocco win the 2026 FIFA World Cup?" }).getByRole("button", { name: /Yes/ }).click();
 
-  await expect(event.locator(".event-selected-summary")).toContainText("Will Morocco win the 2026 FIFA World Cup? · Yes · 2.8¢");
+  await expect(event.locator(".event-selected-summary")).toContainText("Pick added · Yes 2.8¢ · Will Morocco win the 2026 FIFA World Cup?");
   await event.getByRole("button", { name: /Expand/ }).click();
   await expect(event.locator(".event-sibling-row").filter({ hasText: "Will USA win the 2026 FIFA World Cup?" })).toBeVisible();
   await expect(event.locator(".event-sibling-row").filter({ hasText: "Will Mexico win the 2026 FIFA World Cup?" })).toBeVisible();
   await expect(page.getByText("Yes at 2.8¢")).toBeVisible();
   await expect(page.getByText("No at 98¢")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add 1 more pick" })).toBeDisabled();
 });
 
 test("same event winner no collapses the group and permits replacement", async ({ page }) => {
@@ -962,12 +966,12 @@ test("same event winner no collapses the group and permits replacement", async (
   await event.getByRole("button", { name: /Expand/ }).click();
   await event.locator(".event-sibling-row").filter({ hasText: "Will USA win the 2026 FIFA World Cup?" }).getByRole("button", { name: /No/ }).click();
 
-  await expect(event.locator(".event-selected-summary")).toContainText("Will USA win the 2026 FIFA World Cup? · No · 98¢");
+  await expect(event.locator(".event-selected-summary")).toContainText("Pick added · No 98¢ · Will USA win the 2026 FIFA World Cup?");
   await event.getByRole("button", { name: /Expand/ }).click();
   await expect(event.locator(".event-sibling-row").filter({ hasText: "Will Morocco win the 2026 FIFA World Cup?" })).toBeVisible();
   await expect(event.locator(".event-sibling-row").filter({ hasText: "Will Mexico win the 2026 FIFA World Cup?" })).toBeVisible();
   await expect(page.getByText("No at 98¢")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review basket" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add 1 more pick" })).toBeDisabled();
 });
 
 test("large upside simple liquid basket is blocked by the closed beta payout cap", async ({ page }) => {
@@ -981,8 +985,8 @@ test("large upside simple liquid basket is blocked by the closed beta payout cap
     name: /Yes/
   }).click();
 
-  await expect(page.getByRole("button", { name: "Basket unavailable" })).toBeDisabled();
-  await expect(page.getByText("Basket availability")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Combo unavailable" })).toBeDisabled();
+  await expect(page.getByText("Combo availability")).toBeVisible();
   await expect(page.locator(".risk-panel strong", { hasText: "Unavailable" })).toBeVisible();
   await expect(page.getByText("Payout cap")).toBeVisible();
   await expect(page.getByText("Manual review")).toHaveCount(0);
@@ -1003,13 +1007,13 @@ test("positive-upside favorite basket stake controls clamp at the $5 launch cap"
   await page.getByLabel("Search markets").fill("Argentina");
   await page.locator(".market-card").filter({ hasText: "Will Argentina win the next World Cup?" }).getByRole("button", { name: /No/ }).click();
 
-  await page.getByLabel("Buy amount").fill("3");
-  await page.getByLabel("Buy amount").blur();
+  await page.getByLabel("Your stake").fill("3");
+  await page.getByLabel("Your stake").blur();
   await page.getByRole("button", { name: "Add $2", exact: true }).click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
+  await expect(page.getByLabel("Your stake")).toHaveValue("5");
 
   await page.getByRole("button", { name: "Add $5", exact: true }).click();
-  await expect(page.getByLabel("Buy amount")).toHaveValue("5");
+  await expect(page.getByLabel("Your stake")).toHaveValue("5");
 });
 
 test("claimable tickets load every page, use claimable amounts, and keep one idempotency key per retry", async ({ page }) => {
@@ -1368,13 +1372,13 @@ test("recoverable activation sends the payment modal to Portfolio without retry 
   const markets = page.locator(".market-card");
   await markets.nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await markets.nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
-  await page.getByRole("button", { name: "Review basket" }).click();
-  await page.getByRole("button", { name: "Send USDC" }).click();
+  await page.getByRole("button", { name: "Review combo" }).click();
+  await page.getByRole("button", { name: /Pay .* test USDC/ }).click();
 
-  await expect(page.getByText("This basket could not be activated. Received USDC was returned to your available LEGWORK balance. Open Portfolio to review the balance and current withdrawal status.")).toBeVisible();
+  await expect(page.getByText("This combo could not be activated. Received USDC was returned to your available LEGWORK balance. Open Portfolio to review the balance and current withdrawal status.")).toBeVisible();
   await expect(page.getByRole("button", { name: "View Portfolio" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue activation" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Send USDC" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Pay .* test USDC/ })).toHaveCount(0);
 });
 
 test("successful activation ends with a clear live-basket completion state", async ({ page }) => {
@@ -1455,14 +1459,14 @@ test("successful activation ends with a clear live-basket completion state", asy
   await page.getByLabel("Search markets").fill("Up or Down");
   await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
-  await page.getByRole("button", { name: "Review basket" }).click();
-  await page.getByRole("button", { name: "Send USDC" }).click();
+  await page.getByRole("button", { name: "Review combo" }).click();
+  await page.getByRole("button", { name: /Pay .* test USDC/ }).click();
 
-  const completed = page.getByRole("dialog", { name: "Your basket is live" });
+  const completed = page.getByRole("dialog", { name: "Your combo is live" });
   await expect(completed).toBeVisible();
-  await expect(completed).toContainText("Confirmed potential payout");
+  await expect(completed).toContainText("You could win");
   await expect(completed.locator(".firework-burst").first()).toBeAttached();
-  await completed.getByRole("button", { name: "View live basket" }).click();
+  await completed.getByRole("button", { name: "View live combo" }).click();
   await expect(completed).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Your LEGWORK account" })).toBeVisible();
 });
@@ -1526,8 +1530,8 @@ test("expired payment intent blocks wallet transfer and offers a fresh quote", a
   await page.getByLabel("Search markets").fill("Up or Down");
   await page.locator(".market-card").nth(0).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
   await page.locator(".market-card").nth(1).getByRole("button", { name: /^Up\s+\d+¢ for / }).click();
-  await page.getByRole("button", { name: "Review basket" }).click();
-  const send = page.getByRole("button", { name: "Send USDC" });
+  await page.getByRole("button", { name: "Review combo" }).click();
+  const send = page.getByRole("button", { name: /Pay .* test USDC/ });
   await expect(send).toBeEnabled();
   await expect(page.getByText(/Send within 0:/)).toBeVisible();
 

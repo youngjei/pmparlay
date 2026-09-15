@@ -5,7 +5,6 @@ import {
   ChevronDown,
   Clock3,
   ExternalLink,
-  Info,
   Layers3,
   LayoutDashboard,
   ReceiptText,
@@ -152,6 +151,10 @@ type ServerPaymentIntent = {
   txHash?: string;
   ticketId?: string;
   recoveryReason?: string;
+  maxAdverseBps?: number;
+  estimatedPayoutMicroUsd?: string;
+  minFinalPayoutMicroUsd?: string;
+  finalPayoutMicroUsd?: string;
   expiresAt: string;
 };
 
@@ -688,7 +691,7 @@ function apiErrorMessage(payload: unknown, fallback: string) {
   if (item.error === "unauthorized") return "Wallet session expired. Reconnect your wallet and try again.";
   if (item.error === "executable_price_unavailable") return "LEGWORK could not verify current executable prices for every selected leg. Retry in a moment.";
   if (item.error === "quote_pricing_timeout") return "LEGWORK could not refresh executable prices quickly enough. Retry in a moment.";
-  if (item.error === "unknown_market_outcome") return "One selected market is no longer available. Refresh markets and rebuild the basket.";
+  if (item.error === "unknown_market_outcome") return "One selected market is no longer available. Refresh markets and rebuild the combo.";
   if (item.error === "financial_operations_unavailable") return "Payments are temporarily unavailable. Try again shortly.";
   if (item.error === "payment_intent_expired" || item.error === "quote_expired") return "This quote expired. Refresh it before paying.";
   return fallback;
@@ -711,7 +714,7 @@ function isRecoverablePaymentResponse(value: unknown): value is RecoverablePayme
 }
 
 function recoverablePaymentMessage() {
-  return "This basket could not be activated. Received USDC was returned to your available LEGWORK balance. Open Portfolio to review the balance and current withdrawal status.";
+  return "This combo could not be activated. Received USDC was returned to your available LEGWORK balance. Open Portfolio to review the balance and current withdrawal status.";
 }
 
 function marketInitial(question: string) {
@@ -1659,31 +1662,26 @@ export default function App({ auth }: AppProps = {}) {
         : formatUsd(parlay.grossPayout);
   const mobilePayoutDisplay =
     legs.length === 0
-      ? "Add two markets"
+      ? "Choose two picks"
       : legs.length === 1
         ? "Add one more"
         : !hasBuyAmount
-          ? "Enter buy amount"
+          ? "Set your stake"
           : quoteUnavailable
             ? "Quote unavailable"
-          : `${payoutDisplay} potential`;
+          : `${payoutDisplay} to win`;
   const mobileBasketAction =
     legs.length === 0
       ? "Add 2 picks"
       : legs.length === 1
         ? "Add 1 pick"
         : !hasBuyAmount
-          ? "Add amount"
+          ? "Set stake"
           : risk.decision === "reject"
             ? "Unavailable"
             : auth?.enabled && !auth.authenticated
               ? "Connect"
               : "Review";
-  const basketPriceDisplay = hasBasketQuote
-    ? quoteUnavailable
-      ? "Unavailable"
-      : formatCents(authoritativeQuote?.basketPrice ?? parlay.impliedProbability ?? 0)
-    : "—";
   const basketProbabilityDisplay = hasBasketQuote
     ? quoteUnavailable
       ? "Unavailable"
@@ -1705,6 +1703,26 @@ export default function App({ auth }: AppProps = {}) {
   const totalCostDisplay = hasBuyAmount
     ? formatUsd(authoritativeQuote?.totalCostUsd ?? parlay.totalCost)
     : formatUsd(0);
+  const quoteProgress =
+    legs.length === 0
+      ? {
+          eyebrow: "Build your combo",
+          title: "Choose your first pick",
+          detail: "Back an outcome below, then add one more to unlock a payout."
+        }
+      : legs.length === 1
+        ? {
+            eyebrow: "1 of 2 picks",
+            title: "Add one more pick",
+            detail: "One more outcome unlocks your combo price and potential payout."
+          }
+        : !hasBuyAmount
+          ? {
+              eyebrow: `${legs.length} picks ready`,
+              title: "Set your stake",
+              detail: "Choose how much to risk and see what your conviction could return."
+            }
+          : null;
   const quoteValueQualifier =
     hasBasketQuote && hasBuyAmount && !authoritativeQuote && !quoteUnavailable
       ? serverQuoteState === "loading"
@@ -1731,10 +1749,12 @@ export default function App({ auth }: AppProps = {}) {
     }
   }, [hasBasketQuote, hasBuyAmount, payoutDisplay]);
   const checkoutLabel =
-    !hasBasketQuote
-      ? "Review basket"
+    legs.length === 0
+      ? "Choose 2 picks"
+      : legs.length === 1
+        ? "Add 1 more pick"
       : !hasBuyAmount
-      ? "Review basket"
+      ? "Set your stake"
       : auth?.enabled && !auth.authenticated
       ? "Connect wallet"
       : walletSyncFailed
@@ -1742,7 +1762,7 @@ export default function App({ auth }: AppProps = {}) {
       : !walletReadyForCheckout
       ? "Syncing wallet"
       : risk.decision === "reject"
-      ? "Basket unavailable"
+      ? "Combo unavailable"
       : paymentState === "loading"
         ? "Preparing review"
       : paymentState === "sending"
@@ -1750,10 +1770,10 @@ export default function App({ auth }: AppProps = {}) {
       : paymentState === "activating"
         ? "Activating"
       : serverTicketState === "ready"
-          ? "Basket live"
+          ? "Combo live"
           : serverQuoteState === "loading"
         ? "Checking quote"
-        : "Review basket";
+        : "Review combo";
   const checkoutBusy =
     serverQuoteState === "loading" ||
     paymentState === "loading" ||
@@ -1805,8 +1825,8 @@ export default function App({ auth }: AppProps = {}) {
     setLegs([...withoutEvent, { ...outcome, addedAt: Date.now() }]);
     setSelectionNotice(
       replaced
-        ? `Replaced ${replaced.question} (${replaced.outcome}) with ${outcome.question} (${outcome.outcome}).`
-        : `Selected ${outcome.outcome} for ${outcome.eventTitle || outcome.question}.`
+        ? `Pick changed: ${outcome.outcome} for ${outcome.question}. Your earlier pick from this event was removed.`
+        : `Pick added: ${outcome.outcome} for ${outcome.eventTitle || outcome.question}.`
     );
     window.setTimeout(() => {
       setExpandedEvents((current) => {
@@ -1865,7 +1885,7 @@ export default function App({ auth }: AppProps = {}) {
 
   async function requestServerQuote(requestBasketKey = currentBasketKey): Promise<{ quote: ServerQuote | null; error?: string }> {
     if (!canDraft || serverQuoteState === "loading") {
-      return { quote: null, error: serverQuoteState === "loading" ? "Quote check is already running." : "This basket is not ready to quote." };
+      return { quote: null, error: serverQuoteState === "loading" ? "Quote check is already running." : "This combo is not ready to quote." };
     }
 
     setServerQuoteState("loading");
@@ -1896,7 +1916,7 @@ export default function App({ auth }: AppProps = {}) {
         throw new Error(apiErrorMessage(payload, "Quote service unavailable."));
       }
       if (!("status" in payload) || payload.status !== "quoted") {
-        throw new Error("This basket is not available at the current quote.");
+        throw new Error("This combo is not available at the current quote.");
       }
 
       setServerQuote(payload as ServerQuote);
@@ -1933,7 +1953,7 @@ export default function App({ auth }: AppProps = {}) {
     const quote = quoteResult.quote;
     if (!quote) {
       setPaymentState("error");
-      setPaymentError(quoteResult.error || "LEGWORK could not prepare a quote for this basket.");
+      setPaymentError(quoteResult.error || "LEGWORK could not prepare a quote for this combo.");
       return;
     }
 
@@ -1970,7 +1990,6 @@ export default function App({ auth }: AppProps = {}) {
         setBurstKey((key) => key + 1);
         setSelectedTicketId(payload.ticketId);
         setAccountRefreshKey((key) => key + 1);
-        navigateToView("portfolio");
         return;
       }
       if (isRecoverablePaymentResponse(payload)) {
@@ -2228,6 +2247,16 @@ export default function App({ auth }: AppProps = {}) {
     const paymentBusy = paymentState === "loading" || paymentState === "sending" || paymentState === "activating";
     const paymentRecoverable = paymentState === "recoverable";
     const paymentComplete = paymentState === "complete";
+    const paymentStep = paymentComplete
+      ? 4
+      : paymentState === "pending" || paymentState === "activating" || Boolean(txHash)
+        ? 3
+        : paymentState === "sending"
+          ? 2
+          : 1;
+    const protectedPayoutDisplay = paymentIntent?.minFinalPayoutMicroUsd
+      ? formatUsd(Number(paymentIntent.minFinalPayoutMicroUsd) / 1_000_000)
+      : null;
     const reviewUnavailable = paymentState === "error" && !paymentIntent && !txHash;
     const paymentIntentExpired = Boolean(
       paymentIntent &&
@@ -2262,9 +2291,9 @@ export default function App({ auth }: AppProps = {}) {
             <div>
               <span className="section-label">
                 {paymentComplete ? <Trophy size={16} /> : <ReceiptText size={16} />}
-                {paymentComplete ? "Basket confirmed" : "Review ticket"}
+                {paymentComplete ? "Combo confirmed" : "Final check"}
               </span>
-              <h2 id="payment-modal-title">{paymentComplete ? "Your basket is live" : "Buy this basket"}</h2>
+              <h2 id="payment-modal-title">{paymentComplete ? "Your combo is live" : "Review your combo"}</h2>
             </div>
             <button
               className="icon-btn quiet"
@@ -2278,8 +2307,20 @@ export default function App({ auth }: AppProps = {}) {
             </button>
           </div>
 
+          <ol className="checkout-steps" aria-label="Checkout progress">
+            {["Review", "Confirm", "Price check", "Live"].map((label, index) => {
+              const step = index + 1;
+              return (
+                <li className={step < paymentStep ? "complete" : step === paymentStep ? "active" : ""} key={label}>
+                  <span>{step}</span>
+                  <strong>{label}</strong>
+                </li>
+              );
+            })}
+          </ol>
+
           <div className="payment-hero">
-            <span>{paymentComplete ? "Confirmed potential payout" : `Total due${quoteValueQualifier}`}</span>
+            <span>{paymentComplete ? "You could win" : `You pay today${quoteValueQualifier}`}</span>
             {paymentComplete ? (
               <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
             ) : (
@@ -2287,8 +2328,8 @@ export default function App({ auth }: AppProps = {}) {
             )}
             <small>
               {paymentComplete
-                ? `Your ${paymentLegs.length}-pick basket is now tracking every result.`
-                : `Stake plus operation fees, paid in USDC on ${paymentNetwork}.`}
+                ? `Your ${paymentLegs.length}-pick combo is tracking every result.`
+                : `${formatUsd(authoritativeQuote?.stakeUsd ?? amount)} stake + ${operationFeeDisplay} fees · Test USDC on ${paymentNetwork}.`}
             </small>
             {authoritativeQuote ? (
               <small className="payment-quote-update">
@@ -2314,72 +2355,30 @@ export default function App({ auth }: AppProps = {}) {
 
           <div className="payment-grid">
             <div>
-              <span>Potential payout{quoteValueQualifier}</span>
+              <span>You could win{quoteValueQualifier}</span>
               <AnimatedPayout value={reviewUnavailable ? "Unavailable" : payoutDisplay} burstKey={burstKey} compact />
             </div>
             <div>
-              <span>Basket price{quoteValueQualifier}</span>
-              <strong>{reviewUnavailable ? "Unavailable" : basketPriceDisplay}</strong>
-            </div>
-            <div>
-              <span>Quote spread{quoteValueQualifier}</span>
-              <strong>{reviewUnavailable ? "Unavailable" : quoteSpreadDisplay}</strong>
-            </div>
-            <div>
-              <span>Payout multiple{quoteValueQualifier}</span>
-              <strong>{reviewUnavailable ? "Unavailable" : payoutMultipleDisplay}</strong>
-            </div>
-            <div>
-              <span>Operation fee{quoteValueQualifier}</span>
-              <strong>{reviewUnavailable ? "—" : operationFeeDisplay}</strong>
-            </div>
-            <div>
-              <span>Profit return{quoteValueQualifier}</span>
-              <strong>{reviewUnavailable ? "—" : `+${formatPercent(profitReturn)}`}</strong>
+              <span>What needs to happen</span>
+              <strong>All {paymentLegs.length} picks must win</strong>
             </div>
           </div>
 
-          {paymentIntent ? (
-            <>
-              <div className={paymentIntentExpired ? "payment-expiry expired" : "payment-expiry"} role="status">
-                <Clock3 size={15} />
-                <strong>
-                  {paymentIntentExpired ? "Quote expired" : `Send within ${expiryCountdown(paymentIntent.expiresAt, paymentClockNow)}`}
-                </strong>
-              </div>
-              <details className="payment-technical">
-                <summary>Transaction details</summary>
-                <div className="payment-addresses">
-                  <div>
-                    <span>Network</span>
-                    <strong>{paymentNetwork}</strong>
-                  </div>
-                  <div>
-                    <span>Treasury</span>
-                    <strong>{compactId(paymentIntent.treasuryAddress)}</strong>
-                  </div>
-                  <div>
-                    <span>USDC contract</span>
-                    <strong>{compactId(paymentIntent.usdcContractAddress)}</strong>
-                  </div>
-                  <div>
-                    <span>Expires</span>
-                    <strong>{shortDateTime(paymentIntent.expiresAt)}</strong>
-                  </div>
-                </div>
-                {txHash ? (
-                  <a className="payment-tx-link" href={explorerUrl} target="_blank" rel="noreferrer">
-                    <ExternalLink size={15} />
-                    View transfer {compactId(txHash)}
-                  </a>
-                ) : null}
-              </details>
-            </>
+          {!paymentComplete ? (
+            <div className="checkout-protection">
+              <strong>Your price is protected</strong>
+              <span>
+                We recheck live prices after payment before creating your ticket.
+                {protectedPayoutDisplay
+                  ? ` Your combo only activates at ${protectedPayoutDisplay} or better.`
+                  : " If the move exceeds your approved limit, no ticket is created and your USDC stays available to withdraw."}
+              </span>
+            </div>
           ) : null}
 
           {paymentState === "pending" ? (
             <div className="payment-note pending">
-              <span>{paymentError || "Waiting for the confirmed USDC transfer before activating this basket."}</span>
+              <span>{paymentError || "USDC sent. Once confirmed, we’ll check the final price before your combo goes live."}</span>
               <i className="payment-spinner" aria-hidden="true" />
             </div>
           ) : paymentError ? (
@@ -2405,7 +2404,7 @@ export default function App({ auth }: AppProps = {}) {
             ) : paymentState === "complete" ? (
               <button className="checkout-btn" onClick={openPortfolioFromPayment} type="button">
                 <LayoutDashboard size={18} />
-                View live basket
+                View live combo
               </button>
             ) : canContinueActivation ? (
               <button className="checkout-btn" onClick={continuePaymentActivation} type="button">
@@ -2420,11 +2419,82 @@ export default function App({ auth }: AppProps = {}) {
                   : paymentState === "sending"
                     ? "Confirm in wallet"
                     : paymentState === "activating"
-                      ? "Activating"
-                      : "Send USDC"}
+                      ? "Checking final price"
+                      : `Pay ${amountDue} test USDC`}
               </button>
             )}
           </div>
+
+          {paymentIntent ? (
+            <div className={paymentIntentExpired ? "payment-expiry expired" : "payment-expiry"} role="status">
+              <Clock3 size={15} />
+              <strong>
+                {paymentIntentExpired ? "Quote expired" : `Send within ${expiryCountdown(paymentIntent.expiresAt, paymentClockNow)}`}
+              </strong>
+            </div>
+          ) : null}
+
+          {!paymentComplete ? (
+            <div className="ticket-terms-note">
+              <strong>LEGWORK ticket · Sepolia beta · Test USDC only</strong>
+              <span>
+                Polymarket supplies market prices, rules, and results. If a leg is voided, your payout is recalculated;
+                if every leg is voided, your stake returns and fees remain paid.
+              </span>
+            </div>
+          ) : null}
+
+          <details className="payment-technical payment-price-details">
+            <summary>Price &amp; payout details</summary>
+            <div className="payment-addresses">
+              <div>
+                <span>Combined chance{quoteValueQualifier}</span>
+                <strong>{reviewUnavailable ? "Unavailable" : basketProbabilityDisplay}</strong>
+              </div>
+              <div>
+                <span>Payout multiple{quoteValueQualifier}</span>
+                <strong>{reviewUnavailable ? "Unavailable" : payoutMultipleDisplay}</strong>
+              </div>
+              <div>
+                <span>LEGWORK adjustment{quoteValueQualifier}</span>
+                <strong>{reviewUnavailable ? "Unavailable" : quoteSpreadDisplay}</strong>
+              </div>
+              <div>
+                <span>Profit if every pick wins{quoteValueQualifier}</span>
+                <strong>{reviewUnavailable ? "—" : `${formatUsd(netProfit)} · +${formatPercent(profitReturn)}`}</strong>
+              </div>
+            </div>
+          </details>
+
+          {paymentIntent ? (
+            <details className="payment-technical">
+              <summary>Transaction details</summary>
+              <div className="payment-addresses">
+                <div>
+                  <span>Network</span>
+                  <strong>{paymentNetwork}</strong>
+                </div>
+                <div>
+                  <span>Treasury</span>
+                  <strong>{compactId(paymentIntent.treasuryAddress)}</strong>
+                </div>
+                <div>
+                  <span>USDC contract</span>
+                  <strong>{compactId(paymentIntent.usdcContractAddress)}</strong>
+                </div>
+                <div>
+                  <span>Expires</span>
+                  <strong>{shortDateTime(paymentIntent.expiresAt)}</strong>
+                </div>
+              </div>
+              {txHash ? (
+                <a className="payment-tx-link" href={explorerUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={15} />
+                  View transfer {compactId(txHash)}
+                </a>
+              ) : null}
+            </details>
+          ) : null}
         </section>
       </div>
     );
@@ -3158,7 +3228,7 @@ export default function App({ auth }: AppProps = {}) {
                 aria-label={`${outcome.outcome} ${formatCents(outcome.price)} for ${row.question}`}
                 type="button"
               >
-                <span>{outcome.outcome}</span>
+                <span>{isSelected ? `${outcome.outcome} picked` : outcome.outcome}</span>
                 <strong>{formatCents(outcome.price)}</strong>
               </button>
             );
@@ -3219,7 +3289,9 @@ export default function App({ auth }: AppProps = {}) {
                 </a>
               ) : null}
               <span className={selected ? "event-selected-summary active" : "event-selected-summary"}>
-                {selected ? `${selected.question} · ${selected.outcome} · ${formatCents(selected.price)}` : "No pick yet"}
+                {selected
+                  ? `Pick added · ${selected.outcome} ${formatCents(selected.price)} · ${selected.question}`
+                  : `Choose 1 from ${surface.marketCount} markets`}
               </span>
             </div>
           </div>
@@ -3238,6 +3310,7 @@ export default function App({ auth }: AppProps = {}) {
             aria-controls={siblingListId}
             aria-label={`${expanded ? "Collapse" : "Expand"} ${surface.eventTitle}`}
           >
+            <span>{expanded ? "Hide" : `Browse ${surface.marketCount}`}</span>
             <ChevronDown size={20} />
           </button>
         </div>
@@ -3282,7 +3355,7 @@ export default function App({ auth }: AppProps = {}) {
             <Layers3 size={18} />
             <span>LEGWORK</span>
           </button>
-          <p>Why win once when you can win big?</p>
+          <p>Stack your strongest calls into one bigger payout.</p>
         </div>
         <nav className="top-nav" aria-label="Primary">
           {(["markets", "portfolio", "lp-vault"] as const).map((view) => (
@@ -3315,27 +3388,33 @@ export default function App({ auth }: AppProps = {}) {
       </header>
 
       {activeView === "markets" ? (
-      <section className={hasBasketQuote ? "quote-strip" : "quote-strip empty"} aria-label="Quote summary">
-        <div>
-          <span>Selected</span>
-          <strong>{legs.length}</strong>
-        </div>
-        <div>
-          <span>Basket probability{quoteValueQualifier}</span>
-          <strong>{basketProbabilityDisplay}</strong>
-        </div>
-        <div>
-          <span>Basket price{quoteValueQualifier}</span>
-          <strong>{basketPriceDisplay}</strong>
-        </div>
-        <div>
-          <span>Potential payout{quoteValueQualifier}</span>
-          <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
-        </div>
-        <div>
-          <span>Amount due{quoteValueQualifier}</span>
-          <strong>{totalCostDisplay}</strong>
-        </div>
+      <section className={quoteProgress ? "quote-strip progress" : "quote-strip ready"} aria-label="Combo summary">
+        {quoteProgress ? (
+          <div className="quote-progress-copy">
+            <span>{quoteProgress.eyebrow}</span>
+            <strong>{quoteProgress.title}</strong>
+            <small>{quoteProgress.detail}</small>
+          </div>
+        ) : (
+          <>
+            <div>
+              <span>Your combo</span>
+              <strong>{legs.length} picks</strong>
+            </div>
+            <div>
+              <span>You pay today{quoteValueQualifier}</span>
+              <strong>{totalCostDisplay}</strong>
+            </div>
+            <div className="quote-win-cell">
+              <span>You could win{quoteValueQualifier}</span>
+              <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
+            </div>
+            <div>
+              <span>To win</span>
+              <strong>Every pick hits</strong>
+            </div>
+          </>
+        )}
       </section>
       ) : null}
 
@@ -3474,9 +3553,9 @@ export default function App({ auth }: AppProps = {}) {
             <div>
               <span className="section-label">
                 <ShoppingCart size={16} />
-                Your slip
+                Your combo
               </span>
-              <h2>Basket</h2>
+              <h2>{legs.length ? `${legs.length} pick${legs.length === 1 ? "" : "s"}` : "Build your combo"}</h2>
             </div>
             <button className="ghost-btn" onClick={() => setLegs([])} disabled={legs.length === 0}>
               <Trash2 size={16} />
@@ -3486,10 +3565,11 @@ export default function App({ auth }: AppProps = {}) {
 
           <div className={stakeLimitActive ? "stake-control limit-hit" : "stake-control"}>
             <div className="stake-copy">
-              <span>Buy amount</span>
+              <span>Your stake</span>
               <small>
                 Balance <strong>{walletBalanceLabel}</strong>
               </small>
+              <em>Sepolia beta · Test USDC only</em>
             </div>
             <div className="stake-entry">
               <label className="money-input">
@@ -3503,7 +3583,7 @@ export default function App({ auth }: AppProps = {}) {
                   type="number"
                   onBlur={commitAmountInput}
                   onChange={(event) => handleAmountInput(event.target.value)}
-                  aria-label="Buy amount"
+                  aria-label="Your stake"
                 />
               </label>
               {stakeLimitActive ? (
@@ -3536,7 +3616,7 @@ export default function App({ auth }: AppProps = {}) {
             {legs.length === 0 ? (
               <div className="empty-ticket">
                 <ShoppingCart size={26} />
-                <span>Select 2+ markets to price a basket</span>
+                <span>Choose at least two outcomes to unlock your combo payout.</span>
               </div>
             ) : (
               legs.map((leg) => (
@@ -3558,39 +3638,33 @@ export default function App({ auth }: AppProps = {}) {
             )}
           </div>
 
-          <div className="totals-grid">
-            <div>
-              <span>Basket price{quoteValueQualifier}</span>
-              <strong>{basketPriceDisplay}</strong>
-            </div>
-            <div>
-              <span>Quote spread{quoteValueQualifier}</span>
-              <strong>{quoteSpreadDisplay}</strong>
-            </div>
-            <div>
-              <span>Operation fee{quoteValueQualifier}</span>
-              <strong>{operationFeeDisplay}</strong>
-            </div>
-            <div>
-              <span>Payout multiple{quoteValueQualifier}</span>
-              <strong>{payoutMultipleDisplay}</strong>
-            </div>
-          </div>
-
           <div className="checkout-dock">
             <div className="payout-callout" aria-live="polite">
-              <span>Potential payout{quoteValueQualifier}</span>
-              <AnimatedPayout value={payoutDisplay} burstKey={burstKey} />
+              <div className="payout-kicker">
+                <span>Your combo</span>
+                <em>{legs.length} pick{legs.length === 1 ? "" : "s"}</em>
+              </div>
+              <div className="pay-to-win">
+                <div>
+                  <span>You pay</span>
+                  <strong>{hasBuyAmount ? totalCostDisplay : "—"}</strong>
+                </div>
+                <b aria-hidden="true">→</b>
+                <div>
+                  <span>You could win</span>
+                  <AnimatedPayout value={payoutDisplay} burstKey={burstKey} />
+                </div>
+              </div>
               <small>
                 {legs.length < 2
                   ? legs.length === 1
-                    ? "Add one more market to unlock a basket quote."
-                    : "Add two markets to unlock a basket quote."
+                    ? "Add one more pick to unlock your combo payout."
+                    : "Choose two picks to start building your combo."
                   : !hasBuyAmount
-                    ? "Enter buy amount to see payout."
+                    ? "Set your stake to see what you could win."
                     : risk.decision === "reject"
-                      ? "This basket cannot be quoted within the current limits."
-                      : "Paid if every selected market resolves your way."}
+                      ? "This combo cannot be offered within the current limits."
+                      : `Your ${formatUsd(amount)} stake + ${operationFeeDisplay} fees · Every pick must win.`}
               </small>
             </div>
 
@@ -3606,10 +3680,10 @@ export default function App({ auth }: AppProps = {}) {
 
           {hasBasketQuote && hasBuyAmount ? (
             <details className={`risk-panel ${risk.decision}`} open={risk.decision === "reject" ? true : undefined}>
-              <summary>
-                <span>Basket availability</span>
+            <summary>
+                <span>Combo availability</span>
                 <strong>
-                  {risk.decision === "accept" ? "Available" : risk.decision === "review" ? "Price check needed" : "Unavailable"}
+                  {risk.decision === "accept" ? "Ready to review" : risk.decision === "review" ? "Live price check required" : "Unavailable"}
                 </strong>
               </summary>
               <div className="risk-diagnostics">
@@ -3629,7 +3703,8 @@ export default function App({ auth }: AppProps = {}) {
                 <div className="risk-check-list">
                   {visibleRiskChecks.map((check) => (
                     <span className={check.level} key={`${check.label}-${check.detail}`}>
-                      {check.label}: {check.detail}
+                      <b>{check.label}:</b>
+                      <em>{check.detail}</em>
                     </span>
                   ))}
                 </div>
@@ -3637,71 +3712,44 @@ export default function App({ auth }: AppProps = {}) {
             </details>
           ) : null}
 
-          <details className="detail-panel" open>
-            <summary>
-              <Lightbulb size={17} />
-              How to use LEGWORK
-            </summary>
-            <div className="help-list">
-              <span>1. Choose one side from at least two markets.</span>
-              <span>2. The basket price compounds each selected market price.</span>
-              <span>3. You win only if every leg resolves in your direction.</span>
-              <span>4. For launch, LEGWORK allows one pick per event group. A new pick from the same event replaces the prior one.</span>
-            </div>
-          </details>
-
-          <details className="detail-panel">
+          <details className="detail-panel price-detail-panel">
             <summary>
               <Sparkles size={18} />
-              Fees and spread
+              Price &amp; payout details
             </summary>
-            <p>
-              LEGWORK adds a small operation fee for each market in the basket. That covers quote snapshots, market
-              monitoring, and settlement work. The quote spread is the margin between the raw market price and the
-              basket quote.
-            </p>
-            <div className="settlement-steps">
-              <span>$0.50 per selected leg</span>
-              <span>Quote spread: {quoteSpreadDisplay} on the basket quote</span>
-              <span>Risk adjustment: correlation, liquidity, payout, and leg-count checks</span>
-              <span>Amount due: {totalCostDisplay}</span>
+            <div className="totals-grid">
+              <div>
+                <span>Combined chance{quoteValueQualifier}</span>
+                <strong>{basketProbabilityDisplay}</strong>
+              </div>
+              <div>
+                <span>LEGWORK adjustment{quoteValueQualifier}</span>
+                <strong>{quoteSpreadDisplay}</strong>
+              </div>
+              <div>
+                <span>Fees{quoteValueQualifier}</span>
+                <strong>{operationFeeDisplay}</strong>
+              </div>
+              <div>
+                <span>Payout multiple{quoteValueQualifier}</span>
+                <strong>{payoutMultipleDisplay}</strong>
+              </div>
             </div>
+            <p className="price-detail-copy">
+              Fees are $0.50 per pick. The LEGWORK adjustment covers correlation, liquidity, payout, and combo-size risk.
+            </p>
           </details>
 
           <details className="detail-panel">
             <summary>
-              <Info size={17} />
-              Label guide
+              <Lightbulb size={17} />
+              How combos work
             </summary>
-            <div className="label-guide">
-              <div>
-                <strong>Basket price</strong>
-                <span>The combined market-implied odds of every selected leg winning.</span>
-              </div>
-              <div>
-                <strong>Basket probability</strong>
-                <span>The same combined odds shown as a percentage.</span>
-              </div>
-              <div>
-                <strong>Potential payout</strong>
-                <span>The gross amount paid if every selected market resolves your way.</span>
-              </div>
-              <div>
-                <strong>Amount due</strong>
-                <span>Your buy amount plus operation fees.</span>
-              </div>
-              <div>
-                <strong>Quote spread</strong>
-                <span>The dynamic margin LEGWORK applies after correlation, liquidity, payout, and leg-count checks.</span>
-              </div>
-              <div>
-                <strong>Operation fee</strong>
-                <span>The fixed fee for quote snapshots, monitoring, and settlement work.</span>
-              </div>
-              <div>
-                <strong>Payout multiple</strong>
-                <span>The payout multiple LEGWORK quotes after spread. Multiply this by your buy amount to estimate the gross payout.</span>
-              </div>
+            <div className="help-list">
+              <span>1. Choose one outcome from at least two different events.</span>
+              <span>2. Set your stake and see the combined payout.</span>
+              <span>3. Every pick must win for your combo to pay out.</span>
+              <span>4. Choosing another market from the same event replaces your earlier pick.</span>
             </div>
           </details>
         </aside>
@@ -3739,10 +3787,10 @@ export default function App({ auth }: AppProps = {}) {
           >
             <div className="mobile-sheet-handle">
               <div>
-                <span id="mobile-basket-title">Basket</span>
+                <span id="mobile-basket-title">Your combo</span>
                 <AnimatedPayout value={mobilePayoutDisplay} burstKey={burstKey} className="mobile-payout-value" compact />
               </div>
-              <button ref={mobileBasketCloseRef} onClick={closeMobileBasket} aria-label="Collapse basket">
+              <button ref={mobileBasketCloseRef} onClick={closeMobileBasket} aria-label="Collapse combo">
                 <ChevronDown size={20} />
               </button>
             </div>
@@ -3750,8 +3798,8 @@ export default function App({ auth }: AppProps = {}) {
             <div className="mobile-sheet-body">
               <div className={stakeLimitActive ? "stake-control mobile-stake limit-hit" : "stake-control mobile-stake"}>
                 <div className="stake-copy">
-                  <span>Buy amount</span>
-                  <small>Launch cap {formatUsd(stakeCapUsd)}</small>
+                  <span>Your stake</span>
+                  <small>{formatUsd(stakeCapUsd)} max · Sepolia test USDC</small>
                 </div>
                 <div className="stake-entry">
                   <label className="money-input">
@@ -3765,7 +3813,7 @@ export default function App({ auth }: AppProps = {}) {
                       type="number"
                       onBlur={commitAmountInput}
                       onChange={(event) => handleAmountInput(event.target.value)}
-                      aria-label="Mobile buy amount"
+                      aria-label="Mobile stake"
                     />
                   </label>
                   {stakeLimitActive ? (
@@ -3794,7 +3842,7 @@ export default function App({ auth }: AppProps = {}) {
               {legs.length === 0 ? (
                 <div className="empty-ticket mobile-empty">
                   <ShoppingCart size={24} />
-                  <span>Select 2+ markets to price a basket</span>
+                  <span>Choose two outcomes to unlock your combo payout.</span>
                 </div>
               ) : (
                 <div className="mobile-leg-list">
@@ -3815,8 +3863,15 @@ export default function App({ auth }: AppProps = {}) {
               )}
 
               <div className="mobile-sheet-totals">
-                <span>{basketPriceDisplay} basket price</span>
-                <strong>{totalCostDisplay} due</strong>
+                <div>
+                  <span>You pay</span>
+                  <strong>{hasBuyAmount ? totalCostDisplay : "—"}</strong>
+                </div>
+                <b aria-hidden="true">→</b>
+                <div>
+                  <span>You could win</span>
+                  <AnimatedPayout value={payoutDisplay} burstKey={burstKey} compact />
+                </div>
               </div>
               {serverQuoteState === "ready" && activeServerQuote ? (
                 <small className="server-quote-status mobile-status">
@@ -3847,12 +3902,12 @@ export default function App({ auth }: AppProps = {}) {
         onClick={openMobileBasket}
         aria-expanded={mobileBasketOpen}
         aria-controls="mobile-basket-dialog"
-        aria-label={`Open basket: ${legs.length} selected. ${mobileBasketAction}.`}
+        aria-label={`Open combo: ${legs.length} selected. ${mobileBasketAction}.`}
         aria-hidden={mobileBasketOpen || paymentModalOpen ? true : undefined}
         inert={mobileBasketOpen || paymentModalOpen ? true : undefined}
       >
         <div>
-          <span>{legs.length} selected</span>
+          <span>{legs.length ? `${legs.length} pick${legs.length === 1 ? "" : "s"}` : "Build your combo"}</span>
           <AnimatedPayout value={mobilePayoutDisplay} burstKey={burstKey} className="mobile-payout-value" compact />
         </div>
         <span className={canUseCheckoutAction ? "mobile-review ready" : "mobile-review"}>

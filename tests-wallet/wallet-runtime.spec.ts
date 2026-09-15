@@ -207,8 +207,8 @@ test("expired authentication and sync loss block USDC before the wallet transfer
   await page.getByLabel("Set max stake").click();
   await page.locator(".market-card").filter({ hasText: market.question }).getByRole("button", { name: /Yes/ }).click();
   await page.locator(".market-card").filter({ hasText: secondMarket.question }).getByRole("button", { name: /Yes/ }).click();
-  await page.getByRole("button", { name: "Review basket" }).click();
-  const send = page.getByRole("button", { name: "Send USDC" });
+  await page.getByRole("button", { name: "Review combo" }).click();
+  const send = page.getByRole("button", { name: /Pay .* test USDC/ });
   await expect(send).toBeEnabled();
 
   await page.evaluate(() => window.dispatchEvent(new Event("test-expire-wallet-token")));

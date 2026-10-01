@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const processes: ChildProcess[] = [];
 const directories: string[] = [];
 const execFile = promisify(execFileCallback);
+const EXPECTED_STAGING_CHILDREN = 7;
 
 async function fixture(failMarket: boolean) {
   const directory = await mkdtemp(path.join(tmpdir(), "legwork-staging-run-"));
@@ -71,7 +72,7 @@ async function childPids(directory: string) {
   return contents.trim().split("\n").map(Number);
 }
 
-async function waitForChildPids(directory: string, expected = 5, timeoutMs = 3_000) {
+async function waitForChildPids(directory: string, expected = EXPECTED_STAGING_CHILDREN, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -120,8 +121,10 @@ describe("staging foreground supervisor", () => {
     await expect(exitCode(child, 2_000)).resolves.not.toBeNull();
 
     const args = (await readFile(path.join(input.directory, "child.args"), "utf8")).trim().split("\n");
-    expect(args).toHaveLength(5);
+    expect(args).toHaveLength(EXPECTED_STAGING_CHILDREN);
     expect(args.every((line) => line.indexOf("sepolia-staging.env") < line.indexOf("polygon-settlement.env"))).toBe(true);
+    expect(args.some((line) => line.includes("outboxWorker.ts"))).toBe(true);
+    expect(args.some((line) => line.includes("lpVaultAccountingWorker.ts"))).toBe(true);
   });
 
   it("applies the later Polygon authority in a real Node process", async () => {
@@ -190,7 +193,7 @@ describe("staging foreground supervisor", () => {
     await expect(exitCode(child, 2_000)).resolves.not.toBeNull();
     expectStopped(pids);
     const captured = await readFile(path.join(input.directory, "child.env"), "utf8");
-    expect(captured.trim().split("\n")).toHaveLength(5);
+    expect(captured.trim().split("\n")).toHaveLength(EXPECTED_STAGING_CHILDREN);
     expect(captured.trim().split("\n").every((line) => line === "unset|/dev/null")).toBe(true);
   });
 });

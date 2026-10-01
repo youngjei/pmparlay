@@ -1,5 +1,6 @@
 import { closePool } from "../db/client";
 import { claimOutboxBatch, markOutboxFailed, markOutboxSent } from "../db/outboxRepository";
+import { markWorkerFailure, markWorkerSuccess, sanitizeWorkerFailure } from "../db/workerHeartbeatRepository";
 import { startWorkerHeartbeat } from "./heartbeat";
 
 const pollIntervalMs = 5_000;
@@ -30,21 +31,26 @@ async function handleMessage(message: Awaited<ReturnType<typeof claimOutboxBatch
 
 try {
   while (!shouldStop) {
-    const messages = await claimOutboxBatch(10);
-    if (messages.length === 0) {
-      await sleep(pollIntervalMs);
-      continue;
-    }
-
-    for (const message of messages) {
-      try {
-        await handleMessage(message);
-        await markOutboxSent(message.id);
-      } catch (error) {
-        console.error(error);
-        await markOutboxFailed(message.id, Math.min(900, 30 * message.attempts));
+    try {
+      const messages = await claimOutboxBatch(10);
+      for (const message of messages) {
+        try {
+          await handleMessage(message);
+          await markOutboxSent(message.id);
+        } catch (error) {
+          console.error(error);
+          await markOutboxFailed(message.id, Math.min(900, 30 * message.attempts));
+        }
       }
+      await markWorkerSuccess("outbox-worker");
+    } catch (error) {
+      const failure=sanitizeWorkerFailure(error);
+      await markWorkerFailure("outbox-worker",failure).catch((heartbeatError)=>console.error(JSON.stringify({
+        event:"outbox.health.error",error:sanitizeWorkerFailure(heartbeatError)
+      })));
+      console.error(JSON.stringify({event:"outbox.worker.error",error:failure}));
     }
+    await sleep(pollIntervalMs);
   }
 } finally {
   stopHeartbeat();

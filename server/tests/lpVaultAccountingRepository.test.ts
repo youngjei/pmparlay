@@ -7,6 +7,7 @@ import {
   appendLpVaultAccountingEvent,
   assertSupportedLpVaultLiabilityMarkSource,
   finalizeEligibleLpVaultRedemptions,
+  loadLatestVerifiedLpVaultAccounting,
   loadVerifiedLpVaultOwnerAccounting,
   loadUnresolvedLpVaultTicketsAsOf,
   markActiveLpVaultRedemptionReserves,
@@ -63,6 +64,15 @@ function shareProjection(projectionMatches=true){
   return {accounting_event_id:replayEvents[2].id,projection_matches:projectionMatches};
 }
 
+function directProjections(projectionMatches=true){
+  return [replayEvents[0],replayEvents[1],replayEvents[3],replayEvents[4]].map(event=>({
+    accounting_event_id:event.id,
+    expected_event_type:event.event_type,
+    expected_entity_id:event.entity_id,
+    projection_matches:projectionMatches
+  }));
+}
+
 function readOnlyPool(query:ReturnType<typeof vi.fn>){
   const client={
     query:vi.fn((sql:string,args?:unknown[])=>{
@@ -75,7 +85,8 @@ function readOnlyPool(query:ReturnType<typeof vi.fn>){
 }
 
 function latestAccountingRow(asOf:Date){
-  return {vault_id:vaultId,cycle_id:"00000000-0000-4000-8000-000000000020",cutoff_date:"2026-09-10",as_of:asOf,
+  return {vault_id:vaultId,cycle_id:"00000000-0000-4000-8000-000000000020",cutoff_date:"2026-09-10",
+    close_mode:"on_time",source_delay_ms:"60000",recovery_before_snapshot_id:null,as_of:asOf,
     processed_at:new Date(asOf.getTime()+1000),
     reconciliation_id:"00000000-0000-4000-8000-000000000021",book_version:"4",canonical_block_number:"123",
     canonical_block_hash:`0x${"a".repeat(64)}`,gross_assets:"100000000",nav:"100000000",
@@ -154,13 +165,17 @@ describe("lpVaultAccountingRepository", () => {
     expect(event.bookVersion).toBe(9007199254740994n);
   });
 
-  it("takes the vault lock inside a READ COMMITTED transaction before mutation",async()=>{
+  it("takes the exclusive global lock before the vault lock inside a READ COMMITTED transaction",async()=>{
     const statements:string[]=[];
     const client={query:vi.fn(async(sql:string)=>{statements.push(sql);return {rows:[]};}),release:vi.fn()};
     const pool={connect:vi.fn(async()=>client)};
     await runLpVaultAccountingTransaction("00000000-0000-4000-8000-000000000001",async()=>"ok",pool as never);
     expect(statements).toEqual([
       "BEGIN ISOLATION LEVEL READ COMMITTED",
+      "SAVEPOINT financial_gate_transaction_guard",
+      "RELEASE SAVEPOINT financial_gate_transaction_guard",
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      "SELECT set_config('legwork.financial_global_exclusive_lock', 'held', true)",
       "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
       "COMMIT"
     ]);
@@ -260,13 +275,16 @@ describe("lpVaultAccountingRepository", () => {
     const query=vi.fn()
       .mockResolvedValueOnce({rows:replayEvents})
       .mockResolvedValueOnce({rows:[replayProjection()]})
-      .mockResolvedValueOnce({rows:[shareProjection()]});
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:directProjections()})
+      .mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]});
     const replay=await replayLpVaultAccounting(vaultId,{query} as never);
     expect(replay).toMatchObject({eventCount:5,lastBookVersion:5n,lastClosedBookVersion:4n,pendingTailEventCount:1,
       checkpointCount:1,shareEventCount:1,totalMintedShareUnits:100000000000000000000n,totalBurnedShareUnits:0n,
       replayedShareSupplyUnits:100000000000000000000n,checkpointShareSupplyUnits:100000000000000000000n,
       economicNavMicroUnits:100000000n,grossAssetsMicroUnits:100000000n,navDeductionsMicroUnits:0n});
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(6);
   });
 
   it("fails replay when projections disagree with the append-only event ledger",async()=>{
@@ -284,6 +302,77 @@ describe("lpVaultAccountingRepository", () => {
       .mockResolvedValueOnce({rows:[shareProjection(false)]});
     await expect(replayLpVaultAccounting(vaultId,{query} as never))
       .rejects.toThrow("lp_vault_accounting_share_projection_mismatch");
+  });
+
+  it("fails replay when a direct event projection is missing",async()=>{
+    const query=vi.fn()
+      .mockResolvedValueOnce({rows:replayEvents})
+      .mockResolvedValueOnce({rows:[replayProjection()]})
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:directProjections().slice(1)});
+    await expect(replayLpVaultAccounting(vaultId,{query} as never))
+      .rejects.toThrow("lp_vault_accounting_direct_projection_mismatch");
+  });
+
+  it("fails replay when a direct projection keeps its event identity but changes its financial payload",async()=>{
+    const direct=directProjections();
+    direct[0]={...direct[0],projection_matches:false};
+    const query=vi.fn()
+      .mockResolvedValueOnce({rows:replayEvents})
+      .mockResolvedValueOnce({rows:[replayProjection()]})
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:direct});
+    await expect(replayLpVaultAccounting(vaultId,{query} as never))
+      .rejects.toThrow("lp_vault_accounting_direct_projection_mismatch");
+    expect(direct[0]).toMatchObject({
+      accounting_event_id:replayEvents[0].id,
+      expected_event_type:replayEvents[0].event_type,
+      expected_entity_id:replayEvents[0].entity_id,
+      projection_matches:false
+    });
+  });
+
+  it("fails replay when a finalized redemption payload differs from its payable projection",async()=>{
+    const requestId="00000000-0000-4000-8000-000000000099";
+    const events=eventRows([
+      ...replayEvents.slice(0,3).map(row=>({eventType:row.event_type,entityId:row.entity_id,payload:row.payload})),
+      {eventType:"redemption_finalized",entityId:requestId,
+        payload:{requestId,payableId:"00000000-0000-4000-8000-000000000098",amountMicroUnits:"999"}},
+      ...replayEvents.slice(3).map(row=>({eventType:row.event_type,entityId:row.entity_id,payload:row.payload}))
+    ]);
+    const direct=[events[0],events[1],events[4],events[5]].map(event=>({
+      accounting_event_id:event.id,expected_event_type:event.event_type,expected_entity_id:event.entity_id,
+      projection_matches:true
+    }));
+    const query=vi.fn()
+      .mockResolvedValueOnce({rows:events})
+      .mockResolvedValueOnce({rows:[replayProjection({closing_event_version:"5"})]})
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:direct})
+      .mockResolvedValueOnce({rows:[{accounting_event_id:events[3].id,projection_matches:false}]});
+    await expect(replayLpVaultAccounting(vaultId,{query} as never))
+      .rejects.toThrow("lp_vault_accounting_redemption_lifecycle_projection_mismatch");
+  });
+
+  it("fails replay when redemption lifecycle history omits a projected transition",async()=>{
+    const requestId="00000000-0000-4000-8000-000000000099";
+    const events=eventRows([
+      ...replayEvents.map(row=>({eventType:row.event_type,entityId:row.entity_id,payload:row.payload})),
+      {eventType:"redemption_requested",entityId:requestId,payload:{userId,requestedShareUnits:"1"}}
+    ]);
+    const direct=[...directProjections(),{
+      accounting_event_id:events[5].id,expected_event_type:"redemption_requested",expected_entity_id:requestId,
+      projection_matches:true
+    }];
+    const query=vi.fn()
+      .mockResolvedValueOnce({rows:events})
+      .mockResolvedValueOnce({rows:[replayProjection()]})
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:direct})
+      .mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]});
+    await expect(replayLpVaultAccounting(vaultId,{query} as never))
+      .rejects.toThrow("lp_vault_accounting_redemption_history_mismatch");
   });
 
   it("rejects value-changing events after the latest closed cycle",async()=>{
@@ -308,13 +397,44 @@ describe("lpVaultAccountingRepository", () => {
     expect(query).toHaveBeenCalledOnce();
   });
 
+  it("withholds a legacy closed cycle without 0049 close evidence",async()=>{
+    const asOf=new Date("2026-09-10T00:04:00Z");
+    const query=vi.fn().mockResolvedValueOnce({rows:[{
+      ...latestAccountingRow(asOf),close_mode:null,source_delay_ms:null,recovery_before_snapshot_id:null
+    }]});
+    await expect(loadLatestVerifiedLpVaultAccounting(vaultId,{query} as never)).resolves.toBeUndefined();
+  });
+
+  it("returns the public owner path as unavailable when its latest close is legacy evidence",async()=>{
+    const asOf=new Date("2026-09-10T00:04:00Z");
+    const query=vi.fn().mockResolvedValueOnce({rows:[{
+      ...latestAccountingRow(asOf),close_mode:null,source_delay_ms:null,recovery_before_snapshot_id:null
+    }]});
+    const {pool}=readOnlyPool(query);
+    await expect(loadVerifiedLpVaultOwnerAccounting(vaultId,userId,pool as never,{now:asOf})).resolves.toEqual({
+      status:"unavailable",reason:"accounting_missing",vaultId,userId
+    });
+  });
+
+  it("fails closed for partially populated hardened close evidence",async()=>{
+    const asOf=new Date("2026-09-10T00:04:00Z");
+    const query=vi.fn().mockResolvedValueOnce({rows:[{
+      ...latestAccountingRow(asOf),source_delay_ms:null
+    }]});
+    await expect(loadLatestVerifiedLpVaultAccounting(vaultId,{query} as never))
+      .rejects.toThrow("lp_vault_accounting_close_evidence_invalid");
+  });
+
   it("fails owner accounting closed when replay and the public checkpoint disagree",async()=>{
     const asOf=new Date("2026-09-10T00:04:00Z");
     const mismatchedQuery=vi.fn()
       .mockResolvedValueOnce({rows:[{...latestAccountingRow(asOf),nav:"100000001",price_numerator:"100000001"}]})
       .mockResolvedValueOnce({rows:replayEvents})
       .mockResolvedValueOnce({rows:[replayProjection()]})
-      .mockResolvedValueOnce({rows:[shareProjection()]});
+      .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:directProjections()})
+      .mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]});
     const wrapped=readOnlyPool(mismatchedQuery);
     await expect(loadVerifiedLpVaultOwnerAccounting(vaultId,userId,wrapped.pool as never,{now:asOf}))
       .rejects.toThrow("lp_vault_owner_accounting_replay_mismatch");
@@ -329,6 +449,9 @@ describe("lpVaultAccountingRepository", () => {
       .mockResolvedValueOnce({rows:replayEvents})
       .mockResolvedValueOnce({rows:[replayProjection()]})
       .mockResolvedValueOnce({rows:[shareProjection()]})
+      .mockResolvedValueOnce({rows:directProjections()})
+      .mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]})
       .mockResolvedValueOnce({rows:[{id:"00000000-0000-4000-8000-000000000030",amount_micro_units:"5000000",
         eligible_after_cutoff:"2026-09-11",created_at:new Date("2026-09-10T04:00:00Z")}]})
       .mockResolvedValueOnce({rows:[{id:"00000000-0000-4000-8000-000000000031",
@@ -351,7 +474,7 @@ describe("lpVaultAccountingRepository", () => {
     if(owner.status!=="available") throw new Error("expected owner accounting");
     expect(owner.pendingDeposits[0].amountMicroUnits).toBe(5000000n);
     expect(owner.withdrawals.map(item=>item.currentValueMicroUnits)).toEqual([10000000n,25000000n]);
-    expect(query.mock.calls[5][0]).toContain("cumulative_allocated_basis_micro_units");
+    expect(query.mock.calls[8][0]).toContain("cumulative_allocated_basis_micro_units");
     expect(client.query.mock.calls[0][0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
   });

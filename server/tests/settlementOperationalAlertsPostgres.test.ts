@@ -11,6 +11,7 @@ const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const postgresDescribe = testDatabaseUrl ? describe : describe.skip;
 const migrationsDirectory = path.join(process.cwd(), "server/db/migrations");
 const originalDatabaseUrl = config.DATABASE_URL;
+const FULL_MIGRATION_TEST_TIMEOUT_MS = 15_000;
 
 async function applyMigrations(client: pg.Client, through?: string) {
   const migrations = (await readdir(migrationsDirectory))
@@ -230,7 +231,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
         "settlement.alert.remediated"
       ]);
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("opens an immediate critical incident for a blocked leg before its due time", async (context) => {
     await withDisposableSchema(context, async (client) => {
@@ -257,7 +258,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
       );
       expect(incident.rows[0]).toEqual({ severity: "critical", reason: "settlement_blocked" });
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("deduplicates an alert when two settlement cycles race", async (context) => {
     await withDisposableSchema(context, async (client) => {
@@ -295,7 +296,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
       expect(audits.rows[0]?.count).toBe("1");
       expect(outbox.rows[0]?.count).toBe("1");
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("reserves bounded batch capacity for an existing alert that needs escalation", async (context) => {
     await withDisposableSchema(context, async (client) => {
@@ -324,7 +325,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
       );
       expect(incident.rows[0]?.severity).toBe("critical");
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("rotates existing incidents while continuing to admit new alerts across bounded cycles", async (context) => {
     await withDisposableSchema(context, async (client) => {
@@ -362,7 +363,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
         expect.arrayContaining(existing.map((ids) => ({ entityId: ids.ticketLeg, severity: "critical" })))
       );
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("rejects a newly frozen leg without an immutable settlement due time", async (context) => {
     await withDisposableSchema(context, async (client) => {
@@ -384,7 +385,7 @@ postgresDescribe("settlement operational alerts PostgreSQL integration", () => {
         await client.query("ALTER TABLE ticket_legs ENABLE TRIGGER ticket_legs_frozen_validation_provenance");
       }
     });
-  });
+  }, FULL_MIGRATION_TEST_TIMEOUT_MS);
 
   it("backfills a malformed legacy snapshot from the market deadline without aborting migration 0042", async (context) => {
     await withDisposableSchema(

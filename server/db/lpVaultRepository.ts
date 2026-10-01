@@ -58,6 +58,9 @@ export type PublicLpVaultAccounting = {
   asOf: string;
   processedAt: string;
   cycleCutoffAt: string;
+  closeMode: "on_time" | "unchanged_state_recovery";
+  sourceDelayMs: string;
+  recoveryBeforeSnapshotId?: string;
   reconciliationId: string;
   bookVersion: string;
   canonicalBlockNumber: string;
@@ -410,6 +413,11 @@ export function deriveLpVaultPublicView(input: {
       asOf: accounting.asOf.toISOString(),
       processedAt: accounting.processedAt.toISOString(),
       cycleCutoffAt: `${accounting.cutoffDate}T00:00:00.000Z`,
+      closeMode: accounting.closeMode,
+      sourceDelayMs: accounting.sourceDelayMs.toString(),
+      ...(accounting.recoveryBeforeSnapshotId
+        ? { recoveryBeforeSnapshotId: accounting.recoveryBeforeSnapshotId }
+        : {}),
       reconciliationId: accounting.reconciliationId,
       bookVersion: accounting.bookVersion.toString(),
       canonicalBlockNumber: accounting.canonicalBlockNumber.toString(),

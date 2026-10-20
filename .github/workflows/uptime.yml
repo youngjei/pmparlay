@@ -1,0 +1,40 @@
+name: Public Deployment Uptime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/check-public-deployment.mjs
+      - scripts/check-public-deployment.test.mjs
+      - .github/workflows/uptime.yml
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-deployment-uptime
+  cancel-in-progress: true
+
+jobs:
+  uptime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Verify monitor behavior
+        run: node --test scripts/check-public-deployment.test.mjs
+
+      - name: Check public endpoints
+        run: node scripts/check-public-deployment.mjs

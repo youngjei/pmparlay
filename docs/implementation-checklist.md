@@ -1,7 +1,7 @@
 # LEGWORK Implementation Checklist
 
 Status: Canonical
-Last updated: 2026-09-15
+Last updated: 2026-10-20
 
 An item is complete only after implementation, automated testing, runtime verification, and independent QA when the risk or blast radius warrants it. The current release target is supervised Sepolia staging, not mainnet.
 
@@ -128,6 +128,10 @@ Foundation evidence on 2026-09-12: 609 unit tests, 71 real PostgreSQL tests, and
 - [x] Verify every accounting event against its direct projection or share/redemption lifecycle history.
 - [x] Add the LP accounting worker to production readiness and local staging supervision.
 - [x] Add an operator replay command for release verification.
-- [ ] Expand the attached Railway Postgres volume to at least 1 GB, create a Railway-native backup, deploy migration `0049`, and pass managed staging verification. Hobby billing is restored and a checksum-verified portable `pg_dump` is retained locally.
+- [x] Expand the attached Railway Postgres volume to at least 1 GB, verify a protected portable backup through a full PostgreSQL 18 restore, and deploy migrations `0048` and `0049`. Native backup creation is unavailable on the current Hobby plan; the restored portable archive is the supervised-staging substitute.
+- [ ] Complete runtime verification of all six workers and the public catalog after the 2026-10-20 recovery.
+- [ ] Verify exact LP accounting replay after the first canonical post-migration 00:00 UTC close. Accounting stays unavailable before that close; community fund movement remains disabled.
 
 Hardening evidence on 2026-09-15: 616 unit tests, 82 real PostgreSQL tests, 45 Chromium journeys, production build, API typecheck, frontend bundle budgets, and the production dependency audit passed. Independent accounting and operations reviews closed the transaction-boundary, legacy-upgrade, exact-projection, first-cutoff, and worker-supervision findings. Railway Hobby is active, the public API is healthy, and a portable production dump was checksum-verified; deployment remains blocked only by the attached Postgres volume being 426 MB of 500 MB. No production migration was attempted.
+
+Recovery update on 2026-10-20: PR #15 had merged on October 1, but Railway still served revision `7552e29`. The attached 500 MB volume filled and PostgreSQL repeatedly failed recovery with `No space left on device`; both worker deployments had been removed after prolonged crashes. The volume is now 1 GB (Railway offered 1 GB or 5 GB, so the smaller option stayed within the approved 2 GB ceiling). The database recovered, a fresh portable backup was fully restored with matching financial content fingerprints and original migration checksums, migrations `0048`/`0049` applied, and the normal pre-deploy command was restored. All three repository services were deployed from reviewed revision `17af144`, with `ALWAYS` restart policies. Markets load and five of six worker roles are healthy; the deposit scanner remains blocked by the public Sepolia RPC's `pruned history unavailable` response for its saved scan range. The cursor has not been skipped and new payment intents remain gated. GitHub deployment-trigger creation still requires the repository's Railway App access to be repaired. LP accounting is in `waiting_first_cutoff` until 2026-10-21 00:00 UTC (09:00 KST); exact replay remains unverified until then. See the staging runbook for backup and recovery controls.

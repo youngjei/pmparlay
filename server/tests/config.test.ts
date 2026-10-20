@@ -28,6 +28,29 @@ function productionEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.Proces
 }
 
 describe("production staging configuration", () => {
+  it("keeps scanner RPC paging and pacing opt-in while separating catch-up polling", () => {
+    expect(loadConfig(productionEnvironment())).toMatchObject({
+      USDC_DEPOSIT_SCAN_BATCH_BLOCKS: 2000,
+      USDC_DEPOSIT_RPC_MIN_INTERVAL_MS: 0,
+      USDC_DEPOSIT_CATCHUP_INTERVAL_MS: 1000,
+      USDC_DEPOSIT_POLL_INTERVAL_MS: 30000
+    });
+    expect(loadConfig(productionEnvironment()).USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS).toBeUndefined();
+    expect(loadConfig(productionEnvironment({ USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS: "10", USDC_DEPOSIT_RPC_MIN_INTERVAL_MS: "200" }))).toMatchObject({
+      USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS: 10,
+      USDC_DEPOSIT_RPC_MIN_INTERVAL_MS: 200
+    });
+    expect(loadConfig(productionEnvironment({ USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS: "" })).USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS).toBeUndefined();
+    for (const [key, value] of [
+      ["USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS", "0"],
+      ["USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS", "10001"],
+      ["USDC_DEPOSIT_RPC_MIN_INTERVAL_MS", "-1"],
+      ["USDC_DEPOSIT_CATCHUP_INTERVAL_MS", "0"]
+    ]) {
+      expect(() => loadConfig(productionEnvironment({ [key]: value }))).toThrow(key);
+    }
+  });
+
   it("accepts the fixed Sepolia payment network with Redis rate limiting", () => {
     expect(loadConfig(productionEnvironment())).toMatchObject({
       SETTLEMENT_CHAIN_ID: SEPOLIA_PAYMENT_CHAIN_ID,

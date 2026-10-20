@@ -110,6 +110,7 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
     await admin.query(await readFile(path.join(migrationsDir, "0030_market_snapshot_retention_indexes.sql"), "utf8"));
     await admin.query(await readFile(path.join(migrationsDir, "0031_market_source_outcome_identity.sql"), "utf8"));
     await admin.query(await readFile(path.join(migrationsDir, "0039_market_latest_snapshot_pointer.sql"), "utf8"));
+    await admin.query(await readFile(path.join(migrationsDir, "0050_market_current_snapshot_reference_index.sql"), "utf8"));
 
     process.env.DATABASE_URL = schemaConnectionString(testDatabaseUrl!);
     process.env.NODE_ENV = "test";
@@ -391,6 +392,56 @@ describeWithPostgres("market repository PostgreSQL integration", () => {
       [marketId]
     );
     expect(Number(afterCurrentDelete.rows[0].catalog_sequence)).toBe(Number(currentSequence) - 1);
+  });
+
+  it("indexes the current snapshot reference for snapshot-delete foreign key lookups", async () => {
+    const migration = await readFile(
+      path.resolve("server/db/migrations/0050_market_current_snapshot_reference_index.sql"),
+      "utf8"
+    );
+    await admin.query("BEGIN");
+    try {
+      // Reapplying must also work after an emergency production index build.
+      await admin.query(migration);
+      const index = await admin.query(
+        `
+          SELECT indexes.indisvalid, indexes.indisready, indexes.indisunique,
+            indexes.indnatts, access_method.amname,
+            pg_get_indexdef(indexes.indexrelid, 1, true) AS indexed_column
+          FROM pg_index indexes
+          JOIN pg_class index_relation ON index_relation.oid = indexes.indexrelid
+          JOIN pg_am access_method ON access_method.oid = index_relation.relam
+          WHERE indexes.indexrelid = to_regclass($1)
+            AND indexes.indrelid = $2::regclass
+        `,
+        [`${schema}.markets_current_snapshot_id_idx`, `${schema}.markets`]
+      );
+      expect(index.rows).toEqual([{
+        indisvalid: true,
+        indisready: true,
+        indisunique: false,
+        indnatts: 1,
+        amname: "btree",
+        indexed_column: "current_snapshot_id"
+      }]);
+
+      // Tiny fixtures favor sequential scans; test usability, not cost estimates.
+      await admin.query("SET LOCAL enable_seqscan = off");
+      const explained = await admin.query(
+        `EXPLAIN (FORMAT JSON)
+          SELECT 1 FROM ONLY "${schema}".markets AS referenced_market
+          WHERE $1::uuid = referenced_market.current_snapshot_id
+          FOR KEY SHARE OF referenced_market`,
+        ["00000000-0000-0000-0000-000000000000"]
+      );
+      type Plan = { "Node Type": string; "Index Name"?: string; Plans?: Plan[] };
+      const flattenPlan = (plan: Plan): Plan[] => [plan, ...(plan.Plans || []).flatMap(flattenPlan)];
+      const nodes = flattenPlan(explained.rows[0]["QUERY PLAN"][0].Plan);
+      expect(nodes.some((node) => node["Index Name"] === "markets_current_snapshot_id_idx")).toBe(true);
+      expect(nodes.some((node) => node["Node Type"] === "Seq Scan")).toBe(false);
+    } finally {
+      await admin.query("ROLLBACK");
+    }
   });
 
   it("backfills the newest snapshot pointer for an existing market", async () => {

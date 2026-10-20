@@ -1,7 +1,7 @@
 # Railway Sepolia Staging
 
 Status: Required deployment configuration
-Last updated: 2026-09-15
+Last updated: 2026-10-20
 
 The supervised beta uses five Railway services: Postgres, Redis, the public web/API, and two grouped worker services. The API serves the compiled React application on the same origin, so browser API calls do not depend on a separate proxy or cross-origin configuration.
 
@@ -21,7 +21,7 @@ This five-service layout is the approved small-scale staging topology. Before ma
 
 Railway automatically detects the root `Dockerfile`. The normal `legwork-web` pre-deploy command is `npm run db:migrate && npm run db:backfill-settlement-identities && npm run db:provision-lp-vault-shadow`. Migration `0049` is the exception: disable the automatic pre-deploy command for its first rollout, complete the backup and storage checks below, apply and verify `0049` as a supervised one-off migration, then restore the normal pre-deploy command. The vault provisioner is idempotent and refuses any scope except the configured Sepolia house book, treasury Safe, and Circle test-USDC token. The grouped commands must run as one replica each. Use `/healthz` as Railway's deployment health check so web deployment does not depend circularly on workers starting first. Monitor `/readyz` separately as the release gate: it returns `503` until Postgres, Redis, and fresh successful heartbeats from all six required worker roles are healthy, including `lp-vault-accounting`.
 
-Migration `0049` installs the financial-book serialization fence and safe missed-cutoff recovery evidence. Before applying it, require an attached Postgres volume of at least 1 GB with at least 30% free, stop repository services, and take both a Railway volume backup and portable `pg_dump`. Do not attach, delete, or resize a detached volume while its ownership is uncertain. A new installation reports `waiting_first_cutoff` until its first post-migration 00:00 UTC boundary; that state is healthy only during the installation day and exposes no verified accounting value. After the first canonical close, `npm run db:verify-lp-vault-accounting` must report an exact replay before LP accounting is considered release-ready. Missing or inconsistent cutoff evidence after the bootstrap day remains a hard worker failure.
+Migration `0049` installs the financial-book serialization fence and safe missed-cutoff recovery evidence. Before applying it, require an attached Postgres volume of at least 1 GB with at least 30% free, stop repository services, and take a portable `pg_dump` plus a Railway volume backup when the plan supports it. As of 2026-10-20 the Railway API restricts native backups to Pro workspaces. For supervised Sepolia on Hobby, a protected portable archive with a successful full restore rehearsal, matching financial content fingerprints, and verified migration checksums is the accepted substitute. This does not provide native snapshots or point-in-time recovery. Do not attach, delete, or resize a detached volume while its ownership is uncertain. A new installation reports `waiting_first_cutoff` until its first post-migration 00:00 UTC boundary; that state is healthy only during the installation day and exposes no verified accounting value. After the first canonical close, `npm run db:verify-lp-vault-accounting` must report an exact replay before LP accounting is considered release-ready. Missing or inconsistent cutoff evidence after the bootstrap day remains a hard worker failure.
 
 Migration `0047` takes a short exclusive ticket-table lock while it freezes accepted terms and installs legacy quarantines. Run this pre-beta migration during a maintenance window with money-moving traffic paused. The migration runner's five-second lock timeout fails the deploy instead of waiting indefinitely when an older request has not drained.
 
@@ -31,7 +31,13 @@ Run `npm run staging:qa:managed` inside the Railway web service for the migratio
 
 The repository is public. Railway still needs an active GitHub App installation for `youngjei/pmparlay` before enabling automatic deployments from `main`. `railway up` remains the manual deployment path while that installation is absent; do not replace the GitHub App connection with a personal access token stored in the repository.
 
+A connected repository name is not proof of automatic deployment. Verify a `main` deployment trigger exists for each of the three repository services and that the trigger can access this repository. On 2026-10-20 Railway rejected trigger creation with a repository-access error even though reconnecting the source succeeded. Until the GitHub App permissions are repaired, upload all three services from the same clean, reviewed revision and record the revision in each deployment message.
+
 Do not run multiple replicas of either grouped worker service. PostgreSQL singleton leases reject duplicate financial workers, but deployment configuration should still request exactly one replica per group.
+
+Use `ALWAYS` restart policy for the three repository services in supervised staging. A finite `ON_FAILURE` retry budget allowed both worker deployments to be removed after a sustained dependency outage. Restarts do not fix full disks or invalid configuration; an unhealthy `/readyz` still requires operator attention. Keep the startup health check on `/healthz` and verify the complete service separately.
+
+The `Public Deployment Uptime` GitHub workflow checks `/healthz`, `/readyz`, and a nonempty, fresh public catalog every fifteen minutes and on manual dispatch. Confirm Actions failure notifications reach the operator. GitHub schedules are best-effort and can be disabled after prolonged repository inactivity; they are initial staging monitoring, not guaranteed paging. Every release must also verify all three running revisions, all six healthy worker roles, fresh markets, and reconciliation. A green web deployment alone is insufficient.
 
 The staging Postgres volume is intentionally small, but must still meet the 1 GB and 30% free-space deployment floor above. Use this start command so WAL remains bounded while the snapshot retention controls below limit retained catalog storage:
 

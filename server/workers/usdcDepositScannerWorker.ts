@@ -32,6 +32,8 @@ const cursorName = "usdc-deposits";
 const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 export const defaultDepositScanOverlapBlocks = 24n;
 const outboundReadTimeoutMs = 10_000;
+let rpcPacingQueue = Promise.resolve();
+let lastRpcStartedAt: number | undefined;
 // This worker reaches activation only after its current canonical scan succeeds; requiring its prior-cycle
 // success here would prevent recovery after startup or a transient scan failure.
 const depositActivationRequiredWorkers = REQUIRED_FINANCIAL_WORKERS.filter(
@@ -152,6 +154,19 @@ async function resolveDepositTreasuryConfigs(
 
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   requireRpcConfig();
+  const slot = rpcPacingQueue.then(async () => {
+    const intervalMs = config.USDC_DEPOSIT_RPC_MIN_INTERVAL_MS;
+    if (intervalMs > 0 && lastRpcStartedAt !== undefined) {
+      let delayMs = lastRpcStartedAt + intervalMs - performance.now();
+      while (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.ceil(delayMs)));
+        delayMs = lastRpcStartedAt + intervalMs - performance.now();
+      }
+    }
+    lastRpcStartedAt = performance.now();
+  });
+  rpcPacingQueue = slot.catch(() => {});
+  await slot;
   const timeoutSignal = AbortSignal.timeout(outboundReadTimeoutMs);
   let response: Response;
   try {
@@ -365,6 +380,37 @@ function earlierBlock(left: bigint, right: bigint) {
   return left < right ? left : right;
 }
 
+function scanProgress(confirmedBlock: bigint, scannedThrough: bigint, incomplete: boolean) {
+  const backlogBlocks = confirmedBlock > scannedThrough ? confirmedBlock - scannedThrough : 0n;
+  return { backlogBlocks, caughtUp: !incomplete && backlogBlocks === 0n };
+}
+
+export function classifyDepositScanResult(result?: {
+  caughtUp: boolean;
+  backlogBlocks: bigint;
+  incomplete: boolean;
+  activationFailures?: readonly unknown[];
+}) {
+  const activationFailures = result?.activationFailures?.length || 0;
+  const failure = !result
+    ? "deposit_scan_failed"
+    : activationFailures > 0
+      ? `deposit_activation_failures:${activationFailures}`
+      : result.incomplete
+        ? "deposit_scan_incomplete"
+        : !result.caughtUp || result.backlogBlocks > 0n
+          ? `deposit_scan_backlog:${result.backlogBlocks}`
+          : undefined;
+  return {
+    healthy: failure === undefined,
+    failure,
+    pollIntervalMs:
+      result && !result.incomplete && activationFailures === 0 && result.backlogBlocks > 0n
+        ? config.USDC_DEPOSIT_CATCHUP_INTERVAL_MS
+        : config.USDC_DEPOSIT_POLL_INTERVAL_MS
+  };
+}
+
 async function fetchTransferLogRange(input: {
   fromBlock: bigint;
   toBlock: bigint;
@@ -500,21 +546,28 @@ export async function processUsdcDepositScan(dependencies: DepositScannerDepende
         : overlapFromBlock!;
   const maxToBlock =
     reorgDetected || previousCursorBlock === undefined
-      ? reorgDetected
-        ? confirmedBlock
-        : fromBlock + BigInt(config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS) - 1n
+      ? fromBlock + BigInt(config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS) - 1n
       : previousCursorBlock + BigInt(config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS);
   const toBlock = maxToBlock < confirmedBlock ? maxToBlock : confirmedBlock;
 
+  // Never replace reorg evidence until the bounded replay covers the saved cursor.
+  if (reorgDetected && previousCursorBlock !== undefined && toBlock < previousCursorBlock) {
+    throw new Error("deposit_scan_reorg_window_too_small");
+  }
+
   if (toBlock < fromBlock) {
     return {
+      ...scanProgress(confirmedBlock, previousCursorBlock ?? fromBlock - 1n, false),
       fromBlock,
       toBlock,
+      requestedToBlock: toBlock,
       scanned: 0,
       credited: 0,
       ignored: 0,
       duplicate: 0,
       duplicateLogs: 0,
+      activated: 0,
+      activationFailures: [],
       reorgDetected,
       commonAncestorBlock,
       reorged: 0,
@@ -529,8 +582,9 @@ export async function processUsdcDepositScan(dependencies: DepositScannerDepende
   let incomplete = false;
   let completeToBlock = toBlock;
   let rangeFromBlock = fromBlock;
+  const rpcLogPageBlocks = BigInt(config.USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS ?? config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS);
   while (rangeFromBlock <= toBlock) {
-    const rangeToBlock = rangeFromBlock + BigInt(config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS) - 1n < toBlock ? rangeFromBlock + BigInt(config.USDC_DEPOSIT_SCAN_BATCH_BLOCKS) - 1n : toBlock;
+    const rangeToBlock = earlierBlock(rangeFromBlock + rpcLogPageBlocks - 1n, toBlock);
     const page = await fetchTransferLogRange({
       fromBlock: rangeFromBlock,
       toBlock: rangeToBlock,
@@ -547,6 +601,9 @@ export async function processUsdcDepositScan(dependencies: DepositScannerDepende
   }
 
   const effectiveToBlock = incomplete ? completeToBlock : toBlock;
+  if (reorgDetected && previousCursorBlock !== undefined && effectiveToBlock < previousCursorBlock) {
+    throw new Error("deposit_scan_reorg_replay_incomplete");
+  }
   const logs = uniqueLogs(fetchedLogs.filter((log) => log.blockNumber >= fromBlock && log.blockNumber <= effectiveToBlock));
   const duplicateLogs = fetchedLogs.length - logs.length;
   const reorgResult =
@@ -640,6 +697,7 @@ export async function processUsdcDepositScan(dependencies: DepositScannerDepende
     await storeCursor(chainId, cursorName, effectiveToBlock, effectiveToBlockHash, observations);
   }
   return {
+    ...scanProgress(confirmedBlock, laterBlock(previousCursorBlock ?? fromBlock - 1n, effectiveToBlock), incomplete),
     fromBlock,
     toBlock: effectiveToBlock,
     requestedToBlock: toBlock,
@@ -678,11 +736,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     console.log("USDC deposit scanner worker started");
     while (!shouldStop) {
+      let nextPollIntervalMs = config.USDC_DEPOSIT_POLL_INTERVAL_MS;
       try {
         const result = await processUsdcDepositScan();
-        const activationFailures = ("activationFailures" in result ? result.activationFailures : undefined) || [];
-        if (activationFailures.length > 0) {
-          const error = `deposit_activation_failures:${activationFailures.length}`;
+        const activationFailures = result.activationFailures;
+        const classification = classifyDepositScanResult(result);
+        if (classification.failure) {
+          const error = classification.failure;
           await markWorkerFailure("usdc-deposit-scanner", error);
           console.error(
             stringifyDepositWorkerEvent({
@@ -707,6 +767,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
             }))
           })
         );
+        nextPollIntervalMs = classification.pollIntervalMs;
       } catch (error) {
         const failure = sanitizeWorkerFailure(error);
         await markWorkerFailure("usdc-deposit-scanner", failure).catch((heartbeatError) => {
@@ -719,7 +780,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           })
         );
       }
-      await sleeper.sleep(config.USDC_DEPOSIT_POLL_INTERVAL_MS);
+      await sleeper.sleep(nextPollIntervalMs);
     }
   } finally {
     stopHeartbeat();

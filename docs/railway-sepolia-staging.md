@@ -89,6 +89,22 @@ MARKET_INDEX_DB_SOFT_LIMIT_BYTES=700000000
 
 Set `API_HOST=0.0.0.0` only on `legwork-web`. `USDC_DEPOSIT_START_BLOCK` must be captured immediately before the first beta funding transfer and set only on `legwork-financial`. Do not use a moving lookback for the beta ledger boundary.
 
+### Deposit RPC Recovery
+
+Keep provider URLs and keys in Railway variables, never in chat, source, or deployment messages. For the current Alchemy free Sepolia endpoint, configure these on `legwork-financial`:
+
+```text
+USDC_DEPOSIT_SCAN_BATCH_BLOCKS=2000
+USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS=10
+USDC_DEPOSIT_RPC_MIN_INTERVAL_MS=200
+USDC_DEPOSIT_CATCHUP_INTERVAL_MS=1000
+USDC_DEPOSIT_POLL_INTERVAL_MS=30000
+```
+
+The logical scan window is separate from the provider's per-request log-range limit. The scanner processes contiguous ten-block pages, preserves its 24-block reorg overlap, and saves progress only after the verified range is processed. RPC pacing applies to all scanner RPC methods, not just logs; the provider's quota is shared with any other users of that key. A backlog or incomplete response keeps the scanner unhealthy and money-moving routes closed. Catch-up uses the shorter interval; normal polling resumes only after reaching the confirmed head. Monitor `deposit.scan` events for `backlogBlocks`, `caughtUp`, and cursor progress. Do not reset a cursor or move the start block forward to make readiness green.
+
+Migration `0050` indexes the latest-snapshot foreign key so snapshot retention does not repeatedly scan the entire market table. On an existing busy catalog, the equivalent index may be built concurrently before the transactional migration records it. Verify the index is valid before deployment. Storage guards remain mandatory; never raise the soft limit to conceal a full disk. Catalog-state compaction during a stopped-indexer maintenance window may reclaim dead storage without deleting market or financial records.
+
 ## Web Runtime Variable
 
 Set `WEB_ORIGIN` on `legwork-web` at runtime after its public domain is known. It is used for server CORS and is not a Vite build variable:

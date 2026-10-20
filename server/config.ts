@@ -88,6 +88,12 @@ const envSchema = z.object({
   USDC_DEPOSIT_START_BLOCK: optionalNumber,
   USDC_DEPOSIT_SCAN_LOOKBACK_BLOCKS: z.coerce.number().int().positive().default(5_000),
   USDC_DEPOSIT_SCAN_BATCH_BLOCKS: z.coerce.number().int().positive().max(10_000).default(2_000),
+  USDC_DEPOSIT_RPC_LOG_PAGE_BLOCKS: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.coerce.number().int().positive().max(10_000).optional()
+  ),
+  USDC_DEPOSIT_RPC_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(0),
+  USDC_DEPOSIT_CATCHUP_INTERVAL_MS: z.coerce.number().int().positive().default(1_000),
   USDC_DEPOSIT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   BETA_USER_API_KEY: optionalString,
   BETA_USER_EMAIL: z.string().email().default("dev@legwork.local"),
